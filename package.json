@@ -1,0 +1,24 @@
+{
+  "name": "invoice-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.13.5",
+    "dotenv": "^17.2.4",
+    "express-rate-limit": "^8.2.1",
+    "form-data": "^4.0.5",
+    "fs": "^0.0.1-security",
+    "helmet": "^8.1.0",
+    "node-telegram-bot-api": "^0.67.0",
+    "openai": "^6.18.0",
+    "pdfkit": "^0.17.2"
+  }
+}

@@ -1,0 +1,228 @@
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
+const FormData = require('form-data');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+
+// Configuration
+const TELEGRAM_TOKEN = '8561078040:AAF4HAsm_NPHkE7H2-6RiXchB5Y2iXXtAZQ';
+const OPENCLAW_URL = 'http://127.0.0.1:18789';
+const ANTHROPIC_API_KEY = 'sk-ant-api03-VtKf9gdIX4SfnhMQ2jvgxS8TjHQW-MaSwPUqzoWn2f7KTaqBp5YFITIavOdePlop150RsHXjNo5M9gcZc40whw-u1ImDwAA';
+
+// Create bot
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+// Store user sessions
+const userSessions = {};
+
+console.log('✅ Invoice bot started!');
+
+// Handle text messages
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const text = msg.text;
+
+  // Ignore commands for now
+  if (text && text.startsWith('/')) {
+    if (text === '/start') {
+      bot.sendMessage(chatId, 
+        '👋 Welcome to Invoice Bot!\n\n' +
+        'Send me a voice message or text like:\n' +
+        '"Fixed kitchen sink at John Seer house, 14 Mogarden Ave, NY for 500 AED"\n\n' +
+        'I\'ll create a professional invoice for you!'
+      );
+    }
+    return;
+  }
+
+  if (text) {
+    // Process text message
+    await processInvoiceRequest(chatId, userId, text);
+  }
+});
+
+// Handle voice messages
+bot.on('voice', async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const fileId = msg.voice.file_id;
+
+  try {
+    bot.sendMessage(chatId, '🎤 Processing your voice message...');
+
+    // Download voice file
+    const file = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
+    
+    // Download the file
+    const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+    const audioBuffer = Buffer.from(response.data);
+    
+    // Save temporarily
+    const tempFile = `/tmp/voice_${userId}_${Date.now()}.ogg`;
+    fs.writeFileSync(tempFile, audioBuffer);
+
+    // Convert to text using Whisper via OpenClaw
+    const transcription = await transcribeAudio(tempFile);
+    
+    // Clean up temp file
+    fs.unlinkSync(tempFile);
+
+    bot.sendMessage(chatId, `📝 I heard: "${transcription}"\n\nCreating invoice...`);
+
+    // Process the transcribed text
+    await processInvoiceRequest(chatId, userId, transcription);
+
+   catch (error) {
+    console.error('Voice processing error:', error);
+    bot.sendMessage(chatId, '❌ Sorry, I had trouble processing your voice message. Please try again or send text.');
+  }
+});
+
+// Transcribe audio using Whisper
+async function transcribeAudio(audioPath) {
+  try {
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(audioPath));
+    formData.append('model', 'whisper-1');
+
+    const response = await axios.post(
+      'https://api.openai.com/v1/audio/transcriptions',
+      formData,
+      {
+        headers: {
+          'Authorization': `Bearer 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`, // You'll need to add your OpenAI key here
+          ...formData.getHeaders()
+        }
+      }
+    );
+
+    return response.data.text;
+  } catch (error) {
+    console.error('Transcription error:', error);
+    throw error;
+  }
+}
+
+// Process invoice request with Claude
+async function processInvoiceRequest(chatId, userId, text) {
+  try {
+    // Call Claude via Anthropic API to extract invoice data
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content: `Extract invoice details from this message and return ONLY valid JSON with no markdown formatting or extra text:
+
+"${text}"
+
+Return this exact JSON structure:
+{
+  "customer_name": "customer name or 'Unknown'",
+  "service": "service description",
+  "address": "address or 'N/A'",
+  "amount": "numeric amount only",
+  "currency": "AED or USD or currency found"
+}`
+        }]
+      },
+      {
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        }
+      }
+    );
+
+    const claudeResponse = response.data.content[0].text;
+    
+    // Parse the JSON response
+    let invoiceData;
+    try {
+      // Remove markdown code blocks if present
+      const cleanJson = claudeResponse.replace(/```json\n?|\n?```/g, '').trim();
+      invoiceData = JSON.parse(cleanJson);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      console.log('Claude response:', claudeResponse);
+      throw new Error('Could not parse invoice data');
+    }
+
+    // Generate PDF invoice
+    const pdfPath = await generateInvoicePDF(invoiceData, userId);
+
+    // Send the invoice
+    await bot.sendDocument(chatId, pdfPath, {
+      caption: `✅ Invoice created!\n\n` +
+               `Customer: ${invoiceData.customer_name}\n` +
+               `Service: ${invoiceData.service}\n` +
+               `Amount: ${invoiceData.amount} ${invoiceData.currency}`
+    });
+
+    // Clean up PDF file
+    fs.unlinkSync(pdfPath);
+
+  } catch (error) {
+    console.error('Processing error:', error);
+    bot.sendMessage(chatId, 
+      '❌ Sorry, I couldn\'t create the invoice. Please make sure to include:\n' +
+      '• Customer name\n' +
+      '• Service description\n' +
+      '• Amount\n\n' +
+      'Example: "Fixed sink for John Doe at 123 Main St for 500 AED"'
+    );
+  }
+}
+
+// Generate PDF invoice
+async function generateInvoicePDF(data, userId) {
+  return new Promise((resolve, reject) => {
+    const pdfPath = `/tmp/invoice_${userId}_${Date.now()}.pdf`;
+    const doc = new PDFDocument({ margin: 50 });
+    const stream = fs.createWriteStream(pdfPath);
+
+    doc.pipe(stream);
+
+    // Header
+    doc.fontSize(20).text('INVOICE', { align: 'center' });
+    doc.moveDown();
+    
+    // Invoice details
+    doc.fontSize(12);
+    doc.text(`Invoice Date: ${new Date().toLocaleDateString()}`);
+    doc.text(`Invoice #: INV-${Date.now()}`);
+    doc.moveDown();
+
+    // Customer info
+    doc.fontSize(14).text('Bill To:', { underline: true });
+    doc.fontSize(12).text(data.customer_name);
+    if (data.address && data.address !== 'N/A') {
+      doc.text(data.address);
+    }
+    doc.moveDown();
+
+    // Service details
+    doc.fontSize(14).text('Service Details:', { underline: true });
+    doc.fontSize(12).text(data.service);
+    doc.moveDown();
+
+    // Amount
+    doc.fontSize(14).text('Total Amount:', { underline: true });
+    doc.fontSize(16).text(`${data.amount} ${data.currency}`, { bold: true });
+
+    doc.end();
+
+    stream.on('finish', () => resolve(pdfPath));
+    stream.on('error', reject);
+  });
+}
+
+// Error handling
+bot.on('polling_error', (error) => {
+  console.error('Polling error:', error);
+});

@@ -1,0 +1,20 @@
+{
+  "1517570836": {
+    "company_name": "Forillon",
+    "company_address": "DSO, Dubai, UAE",
+    "trn": "skip",
+    "currency": "AED"
+  },
+  "8556400697": {
+    "company_name": "Forillon",
+    "company_address": "DSO, Dubai, UAE",
+    "trn": "Skip",
+    "currency": "AED",
+    "bank_name": "Wio bank",
+    "iban": "0182636728282",
+    "account_name": "Forillon FZCO",
+    "vat_enabled": false,
+    "vat_rate": 0,
+    "logo_path": null
+  }
+}

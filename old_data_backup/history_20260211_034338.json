@@ -1,0 +1,36 @@
+{
+  "1517570836": [
+    {
+      "invoice_id": "INV-1770780967246",
+      "customer_name": "",
+      "service": "this month",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/1517570836_INV-1770780967246.pdf"
+    }
+  ],
+  "8556400697": [
+    {
+      "invoice_id": "INV-1770780693018",
+      "customer_name": "",
+      "service": "Electrical Work",
+      "total": "100.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8556400697_INV-1770780693018.pdf"
+    },
+    {
+      "invoice_id": "INV-1770781320687",
+      "customer_name": "",
+      "service": "Plumbing, electrical",
+      "total": "100.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8556400697_INV-1770781320687.pdf"
+    }
+  ]
+}

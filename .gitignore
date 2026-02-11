@@ -1,0 +1,9 @@
+.env
+.env.*
+data/
+invoices/
+backups/
+*.log
+node_modules/
+/tmp/
+*.tmp
