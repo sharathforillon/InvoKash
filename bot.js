@@ -83,14 +83,44 @@ console.log('InvoKash Bot started');
 function showWelcomeMessage(chatId, userId) {
   const hasProfile = companyProfiles[userId];
   if (hasProfile) {
-    bot.sendMessage(chatId, 
-      'Hello! Welcome to InvoKash!\n\n' +
-      'Create invoices using voice or text.\n\n' +
-      'Example: "Plumbing for Ahmed at Tower 1 for 500"\n\n' +
-      'Commands:\n/stats /download /profile'
-    );
+    bot.sendMessage(chatId, `👋 Hello! Welcome to InvoKash!
+
+    🎙️ I create professional invoices using voice or text.
+
+    📝 FORMAT EXAMPLES:
+
+    ✅ Voice: "Plumbing for Ahmed Khan at Marina Tower for 500"
+    ✅ Text: Fixed AC for Sarah at Villa 23 for 800 dirhams
+    ✅ Short: Cleaning John Doe 250
+
+    💡 TIPS:
+    • Always include customer name
+    • Mention the service/work done
+    • State the amount
+    • Location is optional
+
+    📱 COMMANDS:
+    /stats - View monthly statistics
+    /download - Download all invoices
+    /invoices - View invoice list
+    /profile - View your profile
+
+    🎤 You can also say:
+    "Download this month's invoices"
+    "Show me stats for January"
+    "Get all invoices from last 3 months"`);
   } else {
-    bot.sendMessage(chatId, 'Hello! Welcome to InvoKash!\n\nUse /setup to begin.');
+    bot.sendMessage(chatId, `👋 Hello! Welcome to InvoKash!
+
+🎙️ I create professional invoices using voice or text.
+
+📝 FORMAT EXAMPLES:
+
+✅ Voice: "Plumbing for Ahmed Khan at Marina Tower for 500"
+✅ Text: Fixed AC for Sarah at Villa 23 for 800 dirhams
+✅ Short: Cleaning John Doe 250
+
+To begin using this bot, use /setup.`);
   }
 }
 
@@ -233,10 +263,19 @@ async function handleCommand(chatId, userId, command) {
 function startOnboarding(chatId, userId) {
   onboardingState[userId] = { step: 'disclaimer' };
   bot.sendMessage(chatId, 
-    'DISCLAIMER\n\n' +
-    'InvoKash creates invoices for record-keeping only.\n' +
-    'Not legally certified.\n\n' +
-    'Reply "agree" to continue.'
+    '⚠️ IMPORTANT DISCLAIMER ⚠️\n\n' +
+    'InvoKash is an invoice generation tool. The invoices created are for informational purposes only.\n\n' +
+    '📋 By using this bot, you acknowledge:\n' +
+    '• This is NOT a legally certified tax invoice system\n' +
+    '• You are responsible for compliance with UAE tax laws\n' +
+    '• Your company information will be stored securely\n' +
+    '• Invoices are for record-keeping purposes\n' +
+    '• You must consult with a tax professional for official filings\n\n' +
+    '🔒 Data Protection:\n' +
+    '• Your data is stored securely on our server\n' +
+    '• We do not share your information with third parties\n' +
+    '• You can delete your data anytime with /deletedata\n\n' +
+    'Reply "agree" to continue or "cancel" to stop.'
   );
 }
 
