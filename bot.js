@@ -28,6 +28,7 @@ const BACKUP_DIR = path.join(BASE_DIR, 'backups');
 
 let companyProfiles = {};
 let onboardingState = {};
+let commandState = {};
 let invoiceHistory = {};
 
 const userRateLimits = new Map();
@@ -220,6 +221,14 @@ bot.on('message', async (msg) => {
       await handleOnboarding(chatId, userId, text);
       return;
     }
+    if (commandState[userId]) {
+      await handleCommandState(chatId, userId, text);
+      return;
+    }
+    if (commandState[userId]) {
+      await handleCommandState(chatId, userId, text);
+      return;
+    }
 
     if (!companyProfiles[userId]) {
       bot.sendMessage(chatId, 'Use /setup to begin.');
@@ -254,8 +263,10 @@ async function handleCommand(chatId, userId, command) {
   } else if (command === '/invoices') {
     showInvoiceHistory(chatId, userId);
   } else if (command === '/download') {
+    commandState[userId] = { type: 'download' };
     bot.sendMessage(chatId, 'Reply: "this month", "last month", or "all"');
   } else if (command === '/stats') {
+    commandState[userId] = { type: 'stats' };
     bot.sendMessage(chatId, 'Reply: "this month" or "last month"');
   } else if (command === '/agree' && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, 'agree');
@@ -268,6 +279,43 @@ async function handleCommand(chatId, userId, command) {
     await handleOnboarding(chatId, userId, command.slice(1).toUpperCase());
   } else if (['/Yes', '/No'].includes(command) && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, command.slice(1).toLowerCase());
+  }
+}
+
+async function handleCommandState(chatId, userId, text) {
+  const state = commandState[userId];
+  const input = text.toLowerCase();
+
+  if (state.type === 'stats') {
+    let period = null;
+    if (input.includes('this month')) {
+      period = 'this_month';
+    } else if (input.includes('last month')) {
+      period = 'last_month';
+    }
+    
+    if (period) {
+      delete commandState[userId];
+      await showStats(chatId, userId, period);
+    } else {
+      bot.sendMessage(chatId, 'Please reply: "this month" or "last month"');
+    }
+  } else if (state.type === 'download') {
+    let period = null;
+    if (input.includes('this month')) {
+      period = 'this_month';
+    } else if (input.includes('last month')) {
+      period = 'last_month';
+    } else if (input === 'all') {
+      period = 'all';
+    }
+    
+    if (period) {
+      delete commandState[userId];
+      await downloadInvoicesByPeriod(chatId, userId, period);
+    } else {
+      bot.sendMessage(chatId, 'Please reply: "this month", "last month", or "all"');
+    }
   }
 }
 
@@ -302,6 +350,7 @@ async function handleLogoUpload(chatId, userId, photos) {
     delete onboardingState[userId];
     saveData();
     bot.sendMessage(chatId, 'Setup complete!');
+    showWelcomeMessage(chatId, userId);
   } catch (error) {
     delete onboardingState[userId];
   }
@@ -336,8 +385,13 @@ async function handleOnboarding(chatId, userId, text) {
     const curr = input.toUpperCase();
     if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP'].includes(curr)) {
       companyProfiles[userId].currency = curr;
-      onboardingState[userId].step = 'bank_name';
-      bot.sendMessage(chatId, 'Bank name?');
+      if (curr === 'INR') {
+        onboardingState[userId].step = 'gst_enabled';
+        bot.sendMessage(chatId, 'Include GST?\n/Yes\n/No');
+      } else {
+        onboardingState[userId].step = 'bank_name';
+        bot.sendMessage(chatId, 'Bank name?');
+      }
     } else {
       bot.sendMessage(chatId, 'Please select a valid currency:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP');
     }
@@ -351,9 +405,34 @@ async function handleOnboarding(chatId, userId, text) {
     bot.sendMessage(chatId, 'Account name?');
   } else if (state.step === 'account_name') {
     companyProfiles[userId].account_name = sanitizeInput(text);
-    onboardingState[userId].step = 'vat_enabled';
-    bot.sendMessage(chatId, 'Include VAT?\n/Yes\n/No');
-  } else if (state.step === 'vat_enabled') {
+    if (companyProfiles[userId].currency === 'INR') {
+      onboardingState[userId].step = 'gst_enabled';
+      bot.sendMessage(chatId, 'Include GST?\n/Yes\n/No');
+    } else {
+      onboardingState[userId].step = 'vat_enabled';
+      bot.sendMessage(chatId, 'Include VAT?\n/Yes\n/No');
+    }
+  } else if (state.step === 'gst_enabled') {
+    if (input === 'yes') {
+      companyProfiles[userId].gst_enabled = true;
+      onboardingState[userId].step = 'gst_rate';
+      bot.sendMessage(chatId, 'GST %?');
+    } else if (input === 'no') {
+      companyProfiles[userId].gst_enabled = false;
+      companyProfiles[userId].gst_rate = 0;
+      onboardingState[userId].step = 'logo';
+      bot.sendMessage(chatId, 'Send logo or /skip to proceed');
+    } else {
+      bot.sendMessage(chatId, 'Please select /Yes or /No');
+    }
+  } else if (state.step === 'gst_rate') {
+    const rate = parseFloat(text);
+    if (!isNaN(rate) && rate >= 0 && rate <= 100) {
+      companyProfiles[userId].gst_rate = rate;
+      onboardingState[userId].step = 'logo';
+      bot.sendMessage(chatId, 'Send logo or /skip to proceed');
+    }
+  } else if (state.step === 'vat_enabled' && companyProfiles[userId].currency !== 'INR') {
     if (input === 'yes') {
       companyProfiles[userId].vat_enabled = true;
       onboardingState[userId].step = 'vat_rate';
@@ -379,6 +458,7 @@ async function handleOnboarding(chatId, userId, text) {
       delete onboardingState[userId];
       saveData();
       bot.sendMessage(chatId, 'Setup complete!');
+      showWelcomeMessage(chatId, userId);
     }
   }
 }
@@ -436,6 +516,33 @@ async function showStats(chatId, userId, period) {
   bot.sendMessage(chatId, 'Invoices: ' + filtered.length + '\nTotal: ' + total.toFixed(2));
 }
 
+function generateInvoiceCSV(invoices) {
+  let csv = 'Invoice ID,Date,Customer Name,Service Description,Subtotal,Tax Amount,Total,Currency\n';
+  
+  invoices.forEach(inv => {
+    // Escape quotes in fields and wrap in quotes if contains comma
+    const escape = (str) => {
+      if (!str) return '';
+      str = str.toString().replace(/"/g, '""');
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str + '"';
+      }
+      return str;
+    };
+    
+    csv += escape(inv.invoice_id) + ',';
+    csv += escape(inv.date) + ',';
+    csv += escape(inv.customer_name) + ',';
+    csv += escape(inv.service) + ',';
+    csv += escape(parseFloat(inv.total) - parseFloat(inv.tax_amount)) + ',';
+    csv += escape(inv.tax_amount) + ',';
+    csv += escape(inv.total) + ',';
+    csv += escape(inv.currency) + '\n';
+  });
+  
+  return csv;
+}
+
 async function downloadInvoicesByPeriod(chatId, userId, period) {
   const invs = invoiceHistory[userId] || [];
   const filtered = filterInvoicesByPeriod(invs, period);
@@ -447,13 +554,25 @@ async function downloadInvoicesByPeriod(chatId, userId, period) {
   try {
     bot.sendMessage(chatId, 'Creating ZIP...');
     const zipPath = '/tmp/invoices_' + userId + '_' + Date.now() + '.zip';
+    const csvPath = '/tmp/invoices_' + userId + '_' + Date.now() + '.csv';
+    
+    // Generate CSV file
+    const csvContent = generateInvoiceCSV(filtered);
+    fs.writeFileSync(csvPath, csvContent);
+    
     const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip');
     output.on('close', async () => {
-      await bot.sendDocument(chatId, zipPath, { caption: filtered.length + ' invoices' });
+      await bot.sendDocument(chatId, zipPath, { caption: filtered.length + ' invoices + CSV' });
       fs.unlinkSync(zipPath);
+      fs.unlinkSync(csvPath);
     });
     archive.pipe(output);
+    
+    // Add CSV file to archive
+    archive.file(csvPath, { name: 'invoices.csv' });
+    
+    // Add PDF files to archive
     filtered.forEach(inv => {
       if (fs.existsSync(inv.file_path)) {
         archive.file(inv.file_path, { name: path.basename(inv.file_path) });
@@ -470,7 +589,7 @@ async function processInvoiceRequest(chatId, userId, text) {
     bot.sendMessage(chatId, 'Creating...');
     const response = await axios.post('https://api.anthropic.com/v1/messages',
       { model: 'claude-sonnet-4-5-20250929', max_tokens: 1024,
-        messages: [{ role: 'user', content: 'Extract from: "' + text + '". Return JSON: {"customer_name":"","service":"","address":"","amount":""}' }]
+        messages: [{ role: 'user', content: 'Extract invoice details from: "' + text + '". Return JSON: {"customer_name":"","address":"","line_items":[{"description":"","amount":0}]}. The line_items array should contain each service/item separately with its amount. If only one item is provided, still return as an array with one element.' }]
       },
       { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }}
     );
@@ -489,26 +608,52 @@ async function processInvoiceRequest(chatId, userId, text) {
       console.error('JSON Parse Error:', cleanJson);
       return;
     }
-    const amount = parseFloat(data.amount);
+    
     const profile = companyProfiles[userId];
     
-    let vat = 0, total = amount;
-    if (profile.vat_enabled) {
-      vat = amount * (profile.vat_rate / 100);
-      total = amount + vat;
+    // Calculate subtotal from all line items
+    let subtotal = 0;
+    if (data.line_items && Array.isArray(data.line_items)) {
+      data.line_items.forEach(item => {
+        subtotal += parseFloat(item.amount) || 0;
+      });
+    } else {
+      // Fallback for old format
+      subtotal = parseFloat(data.amount) || 0;
+      data.line_items = [{ description: data.service, amount: subtotal }];
+    }
+    
+    let tax = 0, total = subtotal;
+    let taxType = 'vat';
+    let taxEnabled = false;
+    let taxRate = 0;
+    
+    if (profile.currency === 'INR') {
+      taxEnabled = profile.gst_enabled;
+      taxRate = profile.gst_rate;
+      taxType = 'gst';
+    } else {
+      taxEnabled = profile.vat_enabled;
+      taxRate = profile.vat_rate;
+      taxType = 'vat';
+    }
+    
+    if (taxEnabled) {
+      tax = subtotal * (taxRate / 100);
+      total = subtotal + tax;
     }
 
     const invoiceId = 'INV-' + Date.now();
     const date = new Date().toLocaleDateString('en-GB');
 
     const fullData = { 
-      customer_name: data.customer_name, service: data.service, address: data.address,
+      customer_name: data.customer_name, address: data.address,
       company_name: profile.company_name, company_address: profile.company_address,
       trn: profile.trn, currency: profile.currency, bank_name: profile.bank_name,
       iban: profile.iban, account_name: profile.account_name,
-      vat_enabled: profile.vat_enabled, vat_rate: profile.vat_rate,
+      tax_enabled: taxEnabled, tax_rate: taxRate, tax_type: taxType,
       logo_path: profile.logo_path, invoice_id: invoiceId, date: date,
-      subtotal: amount.toFixed(2), vat_amount: vat.toFixed(2), total: total.toFixed(2)
+      line_items: data.line_items, subtotal: subtotal.toFixed(2), tax_amount: tax.toFixed(2), total: total.toFixed(2)
     };
     
     const pdfPath = await generateProfessionalInvoice(fullData);
@@ -516,9 +661,10 @@ async function processInvoiceRequest(chatId, userId, text) {
     fs.copyFileSync(pdfPath, permanentPath);
 
     if (!invoiceHistory[userId]) invoiceHistory[userId] = [];
+    const serviceDesc = data.line_items && data.line_items.length > 0 ? data.line_items[0].description : 'Service';
     invoiceHistory[userId].push({
-      invoice_id: invoiceId, customer_name: data.customer_name, service: data.service,
-      total: total.toFixed(2), vat_amount: vat.toFixed(2),
+      invoice_id: invoiceId, customer_name: data.customer_name, service: serviceDesc,
+      total: total.toFixed(2), tax_amount: tax.toFixed(2),
       currency: profile.currency, date: date, file_path: permanentPath
     });
 
@@ -569,14 +715,24 @@ async function generateProfessionalInvoice(data) {
     y += 20;
     doc.moveTo(50, y).lineTo(550, y).stroke();
     y += 20;
-    doc.font('Helvetica').text(data.service, 50, y, {width: 300}).text(data.subtotal, 400, y);
-    y += 40;
+    doc.font('Helvetica');
+    
+    // Render each line item
+    if (data.line_items && Array.isArray(data.line_items)) {
+      data.line_items.forEach(item => {
+        doc.text(item.description, 50, y, {width: 300}).text(parseFloat(item.amount).toFixed(2), 400, y);
+        y += 20;
+      });
+    }
+    
+    y += 20;
     doc.moveTo(50, y).lineTo(550, y).stroke();
     y += 20;
     doc.text('Subtotal:', 350, y).text(data.subtotal, 480, y);
     y += 20;
-    if (data.vat_enabled && parseFloat(data.vat_amount) > 0) {
-      doc.text('VAT (' + data.vat_rate + '%):', 350, y).text(data.vat_amount, 480, y);
+    if (data.tax_enabled && parseFloat(data.tax_amount) > 0) {
+      const taxLabel = data.tax_type === 'gst' ? 'GST' : 'VAT';
+      doc.text(taxLabel + ' (' + data.tax_rate + '%):', 350, y).text(data.tax_amount, 480, y);
       y += 15;
     }
     doc.moveTo(350, y).lineTo(550, y).stroke();
