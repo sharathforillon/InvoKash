@@ -1,0 +1,50 @@
+{
+  "1517570836": {
+    "company_name": "test",
+    "company_address": "test",
+    "trn": "2634581234",
+    "currency": "AED",
+    "bank_name": "wio",
+    "iban": "0329434023411",
+    "account_name": "test fzco",
+    "vat_enabled": false,
+    "vat_rate": 0,
+    "logo_path": null
+  },
+  "2025648204": {
+    "company_name": "this month",
+    "company_address": "UAE",
+    "trn": "123445435534",
+    "currency": "AED",
+    "bank_name": "enbd",
+    "iban": "123423145231",
+    "account_name": "reddy",
+    "vat_enabled": false,
+    "vat_rate": 0,
+    "logo_path": null
+  },
+  "8221978544": {
+    "company_name": "Sunhay",
+    "company_address": "Sahara plaza",
+    "trn": "Skip",
+    "currency": "AED",
+    "bank_name": "Wio",
+    "iban": "527281992360272",
+    "account_name": "Sunhay jay",
+    "vat_enabled": false,
+    "vat_rate": 0,
+    "logo_path": null
+  },
+  "8556400697": {
+    "company_name": "Forillon",
+    "company_address": "Dso dubai uae",
+    "trn": "1627282",
+    "currency": "AED",
+    "bank_name": "Wio bank",
+    "iban": "28291910010272-",
+    "account_name": "Forillon FZCO",
+    "vat_enabled": true,
+    "vat_rate": 5,
+    "logo_path": null
+  }
+}

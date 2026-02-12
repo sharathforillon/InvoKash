@@ -257,6 +257,17 @@ async function handleCommand(chatId, userId, command) {
     bot.sendMessage(chatId, 'Reply: "this month", "last month", or "all"');
   } else if (command === '/stats') {
     bot.sendMessage(chatId, 'Reply: "this month" or "last month"');
+  } else if (command === '/agree' && onboardingState[userId]) {
+    await handleOnboarding(chatId, userId, 'agree');
+  } else if (command === '/cancel' && onboardingState[userId]) {
+    delete onboardingState[userId];
+    bot.sendMessage(chatId, 'Setup cancelled.');
+  } else if (command === '/skip' && onboardingState[userId]) {
+    await handleOnboarding(chatId, userId, 'skip');
+  } else if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP'].includes(command.slice(1).toUpperCase()) && onboardingState[userId]) {
+    await handleOnboarding(chatId, userId, command.slice(1).toUpperCase());
+  } else if (['/Yes', '/No'].includes(command) && onboardingState[userId]) {
+    await handleOnboarding(chatId, userId, command.slice(1).toLowerCase());
   }
 }
 
@@ -275,7 +286,7 @@ function startOnboarding(chatId, userId) {
 '• Your data is stored securely on our server\n' +
 '• We do not share your information with third parties\n' +
 '• You can delete your data anytime with /deletedata\n\n' +
-'Reply "agree" to continue or "cancel" to stop.'
+'Use /agree to accept and continue or /cancel to stop.'
   );
 }
 
@@ -301,7 +312,8 @@ async function handleOnboarding(chatId, userId, text) {
   const input = text.toLowerCase().trim();
   if (!companyProfiles[userId]) companyProfiles[userId] = {};
 
-  if (state.step === 'disclaimer' && input === 'agree') {
+  if (state.step === 'disclaimer') {
+    // Only /agree command is accepted at disclaimer step
     onboardingState[userId].step = 'company_name';
     bot.sendMessage(chatId, 'Company name?');
   } else if (state.step === 'company_name') {
@@ -311,17 +323,23 @@ async function handleOnboarding(chatId, userId, text) {
   } else if (state.step === 'company_address') {
     companyProfiles[userId].company_address = sanitizeInput(text);
     onboardingState[userId].step = 'trn';
-    bot.sendMessage(chatId, 'TRN?');
+    bot.sendMessage(chatId, 'Enter your TRN or /skip to proceed:');
   } else if (state.step === 'trn') {
-    companyProfiles[userId].trn = sanitizeInput(text);
+    if (input === 'skip') {
+      companyProfiles[userId].trn = '';
+    } else {
+      companyProfiles[userId].trn = sanitizeInput(text);
+    }
     onboardingState[userId].step = 'currency';
-    bot.sendMessage(chatId, 'Currency? (AED/USD/EUR/INR/SAR/GBP)');
+    bot.sendMessage(chatId, 'Which Currency will you invoice in:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP');
   } else if (state.step === 'currency') {
-    const curr = text.toUpperCase().trim();
+    const curr = input.toUpperCase();
     if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP'].includes(curr)) {
       companyProfiles[userId].currency = curr;
       onboardingState[userId].step = 'bank_name';
       bot.sendMessage(chatId, 'Bank name?');
+    } else {
+      bot.sendMessage(chatId, 'Please select a valid currency:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP');
     }
   } else if (state.step === 'bank_name') {
     companyProfiles[userId].bank_name = sanitizeInput(text);
@@ -334,7 +352,7 @@ async function handleOnboarding(chatId, userId, text) {
   } else if (state.step === 'account_name') {
     companyProfiles[userId].account_name = sanitizeInput(text);
     onboardingState[userId].step = 'vat_enabled';
-    bot.sendMessage(chatId, 'Include VAT? (yes/no)');
+    bot.sendMessage(chatId, 'Include VAT?\n/Yes\n/No');
   } else if (state.step === 'vat_enabled') {
     if (input === 'yes') {
       companyProfiles[userId].vat_enabled = true;
@@ -344,20 +362,24 @@ async function handleOnboarding(chatId, userId, text) {
       companyProfiles[userId].vat_enabled = false;
       companyProfiles[userId].vat_rate = 0;
       onboardingState[userId].step = 'logo';
-      bot.sendMessage(chatId, 'Send logo or type "skip"');
+      bot.sendMessage(chatId, 'Send logo or /skip to proceed');
+    } else {
+      bot.sendMessage(chatId, 'Please select /Yes or /No');
     }
   } else if (state.step === 'vat_rate') {
     const rate = parseFloat(text);
     if (!isNaN(rate) && rate >= 0 && rate <= 100) {
       companyProfiles[userId].vat_rate = rate;
       onboardingState[userId].step = 'logo';
-      bot.sendMessage(chatId, 'Send logo or type "skip"');
+      bot.sendMessage(chatId, 'Send logo or /skip to proceed');
     }
-  } else if (state.step === 'logo' && input === 'skip') {
-    companyProfiles[userId].logo_path = null;
-    delete onboardingState[userId];
-    saveData();
-    bot.sendMessage(chatId, 'Setup complete!');
+  } else if (state.step === 'logo') {
+    if (input === 'skip') {
+      companyProfiles[userId].logo_path = null;
+      delete onboardingState[userId];
+      saveData();
+      bot.sendMessage(chatId, 'Setup complete!');
+    }
   }
 }
 
@@ -579,3 +601,4 @@ bot.on('polling_error', (error) => console.error('Error:', error.message));
 process.on('SIGINT', () => { saveData(); process.exit(0); });
 setInterval(saveData, 5 * 60 * 1000);
 console.log('Ready!');
+

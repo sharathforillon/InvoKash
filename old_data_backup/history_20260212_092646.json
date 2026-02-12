@@ -1,0 +1,160 @@
+{
+  "1517570836": [
+    {
+      "invoice_id": "INV-1770797475258",
+      "customer_name": "sharath",
+      "service": "electrical",
+      "total": "100.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/1517570836_INV-1770797475258.pdf"
+    },
+    {
+      "invoice_id": "INV-1770797664652",
+      "customer_name": "Dr. Madhavi",
+      "service": "research work",
+      "total": "1000.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/1517570836_INV-1770797664652.pdf"
+    },
+    {
+      "invoice_id": "INV-1770875675126",
+      "customer_name": "Reddy",
+      "service": "Plumbing work",
+      "total": "500.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/1517570836_INV-1770875675126.pdf"
+    },
+    {
+      "invoice_id": "INV-1770888315386",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/1517570836_INV-1770888315386.pdf"
+    }
+  ],
+  "2025648204": [
+    {
+      "invoice_id": "INV-1770800098971",
+      "customer_name": "Ahmed",
+      "service": "Plumbing",
+      "total": "300.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770800098971.pdf"
+    },
+    {
+      "invoice_id": "INV-1770814712721",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "NaN",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770814712721.pdf"
+    },
+    {
+      "invoice_id": "INV-1770879163419",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770879163419.pdf"
+    },
+    {
+      "invoice_id": "INV-1770883551236",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770883551236.pdf"
+    },
+    {
+      "invoice_id": "INV-1770883583235",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770883583235.pdf"
+    },
+    {
+      "invoice_id": "INV-1770883632469",
+      "customer_name": "Ahmed Khan",
+      "service": "Plumbing",
+      "total": "500.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770883632469.pdf"
+    },
+    {
+      "invoice_id": "INV-1770883811594",
+      "customer_name": "",
+      "service": "",
+      "total": "NaN",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "12/02/2026",
+      "file_path": "/root/invoice-bot/invoices/2025648204_INV-1770883811594.pdf"
+    }
+  ],
+  "8221978544": [
+    {
+      "invoice_id": "INV-1770788462512",
+      "customer_name": "Janu",
+      "service": "Plumbing work",
+      "total": "100.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8221978544_INV-1770788462512.pdf"
+    },
+    {
+      "invoice_id": "INV-1770788499792",
+      "customer_name": "Sunaina",
+      "service": "Plumbing work",
+      "total": "1000.00",
+      "vat_amount": "0.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8221978544_INV-1770788499792.pdf"
+    }
+  ],
+  "8556400697": [
+    {
+      "invoice_id": "INV-1770800069956",
+      "customer_name": "",
+      "service": "Plumbing Works",
+      "total": "525.00",
+      "vat_amount": "25.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8556400697_INV-1770800069956.pdf"
+    },
+    {
+      "invoice_id": "INV-1770800265040",
+      "customer_name": "",
+      "service": "Plumbing",
+      "total": "210.00",
+      "vat_amount": "10.00",
+      "currency": "AED",
+      "date": "11/02/2026",
+      "file_path": "/root/invoice-bot/invoices/8556400697_INV-1770800265040.pdf"
+    }
+  ]
+}
