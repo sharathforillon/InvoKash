@@ -453,8 +453,20 @@ async function processInvoiceRequest(chatId, userId, text) {
       { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }}
     );
 
-    const cleanJson = response.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
-    const data = JSON.parse(cleanJson);
+    let cleanJson = response.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
+    // Extract JSON if wrapped in extra text
+    const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleanJson = jsonMatch[0];
+    }
+    let data;
+    try {
+      data = JSON.parse(cleanJson);
+    } catch (parseError) {
+      bot.sendMessage(chatId, 'Could not parse invoice data. Try again with clearer details.');
+      console.error('JSON Parse Error:', cleanJson);
+      return;
+    }
     const amount = parseFloat(data.amount);
     const profile = companyProfiles[userId];
     
