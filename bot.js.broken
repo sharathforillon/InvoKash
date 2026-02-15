@@ -5,6 +5,7 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { createPaymentLink } = require("./payments");
+const { createPaymentLink } = require('./payments');
 const OpenAI = require('openai');
 const archiver = require('archiver');
 
@@ -670,26 +671,8 @@ async function processInvoiceRequest(chatId, userId, text) {
     });
 
     saveData();
-    
-    // Create Stripe payment link
-    const paymentResult = await createPaymentLink({
-      invoice_id: invoiceId,
-      customer_name: data.customer_name,
-      total: total.toFixed(2),
-      currency: profile.currency
-    });
-    
-    let caption = '📄 ' + invoiceId + '\n💰 ' + total.toFixed(2) + ' ' + profile.currency;
-    
-    if (paymentResult.success) {
-      caption += '\n\n💳 PAY NOW:\n' + paymentResult.paymentUrl + '\n\n✅ Supports Credit/Debit Cards & Apple Pay';
-      invoiceHistory[userId][invoiceHistory[userId].length - 1].payment_link = paymentResult.paymentUrl;
-      saveData();
-    }
-    
-    await bot.sendDocument(chatId, pdfPath, { caption: caption });
+    await bot.sendDocument(chatId, pdfPath, { caption: invoiceId + '\n' + total.toFixed(2) + ' ' + profile.currency });
     fs.unlinkSync(pdfPath);
-
   } catch (error) {
     bot.sendMessage(chatId, 'Error: ' + error.message);
   }

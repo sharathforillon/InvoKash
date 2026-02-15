@@ -19,6 +19,7 @@
     "helmet": "^8.1.0",
     "node-telegram-bot-api": "^0.67.0",
     "openai": "^6.18.0",
-    "pdfkit": "^0.17.2"
+    "pdfkit": "^0.17.2",
+    "stripe": "^20.3.1"
   }
 }
