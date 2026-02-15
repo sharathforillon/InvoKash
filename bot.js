@@ -132,6 +132,46 @@ function isGreeting(text) {
   return greetings.some(g => text.toLowerCase().trim().startsWith(g));
 }
 
+async function classifyIntent(text) {
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages',
+      { model: 'claude-sonnet-4-5-20250929', max_tokens: 50,
+        messages: [{ role: 'user', content: `Classify this message as ONE of: "invoice", "greeting", "help", or "invalid". Respond with ONLY the word.
+
+Message: "${text}"
+
+Answer:` }]
+      },
+      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }}
+    );
+    const intent = response.data.content[0].text.toLowerCase().trim();
+    const validIntents = ['invoice', 'greeting', 'help', 'invalid'];
+    return validIntents.includes(intent) ? intent : 'invalid';
+  } catch (error) {
+    console.error('Intent classification error:', error.message);
+    return 'invalid';
+  }
+}
+
+function validateExtractedData(data) {
+  const errors = [];
+  
+  if (!data.customer_name || data.customer_name.trim() === '') {
+    errors.push('Missing customer name');
+  }
+  
+  if (!data.line_items || data.line_items.length === 0) {
+    errors.push('Missing service/item description');
+  }
+  
+  const totalAmount = data.line_items?.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0) || 0;
+  if (totalAmount <= 0) {
+    errors.push('Invalid amount - must be greater than 0');
+  }
+  
+  return { valid: errors.length === 0, errors };
+}
+
 function detectIntent(text) {
   const lower = text.toLowerCase();
   if (lower.includes('download')) {
@@ -169,6 +209,11 @@ bot.on('message', async (msg) => {
 
     if (msg.photo && onboardingState[userId] && onboardingState[userId].step === 'logo') {
       await handleLogoUpload(chatId, userId, msg.photo);
+      return;
+    }
+
+    if (!companyProfiles[userId]) {
+      bot.sendMessage(chatId, 'Use /setup to begin.');
       return;
     }
 
@@ -210,8 +255,13 @@ bot.on('message', async (msg) => {
           }
         }
         
-        bot.sendMessage(chatId, 'You said: "' + transcribedText + '"\n\nCreating...');
-        await processInvoiceRequest(chatId, userId, transcribedText);
+        const classification = await classifyIntent(transcribedText);
+        if (classification === 'invoice') {
+          bot.sendMessage(chatId, 'You said: "' + transcribedText + '"\n\nCreating...');
+          await processInvoiceRequest(chatId, userId, transcribedText);
+        } else {
+          bot.sendMessage(chatId, '❌ Not recognized as invoice request.\n\nTry: "Service for Customer at Location for Amount"\n\nExample: "Plumbing for Ahmed Khan at Marina Tower for 500"');
+        }
       } catch (error) {
         bot.sendMessage(chatId, 'Could not process voice.');
       }
@@ -226,15 +276,6 @@ bot.on('message', async (msg) => {
       await handleCommandState(chatId, userId, text);
       return;
     }
-    if (commandState[userId]) {
-      await handleCommandState(chatId, userId, text);
-      return;
-    }
-
-    if (!companyProfiles[userId]) {
-      bot.sendMessage(chatId, 'Use /setup to begin.');
-      return;
-    }
 
     if (text) {
       const intent = detectIntent(text);
@@ -247,7 +288,15 @@ bot.on('message', async (msg) => {
           return;
         }
       }
-      await processInvoiceRequest(chatId, userId, sanitizeInput(text));
+      
+      const classification = await classifyIntent(text);
+      if (classification === 'invoice') {
+        await processInvoiceRequest(chatId, userId, sanitizeInput(text));
+      } else if (classification === 'greeting' || classification === 'help') {
+        showWelcomeMessage(chatId, userId);
+      } else {
+        bot.sendMessage(chatId, '❌ Not recognized as invoice request.\n\nTry: "Service for Customer at Location for Amount"\n\nExample: "Plumbing for Ahmed Khan at Marina Tower for 500"');
+      }
     }
   } catch (error) {
     bot.sendMessage(chatId, 'Error occurred.');
@@ -265,10 +314,21 @@ async function handleCommand(chatId, userId, command) {
     showInvoiceHistory(chatId, userId);
   } else if (command === '/download') {
     commandState[userId] = { type: 'download' };
-    bot.sendMessage(chatId, 'Reply: "this month", "last month", or "all"');
+    bot.sendMessage(chatId, '📥 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
   } else if (command === '/stats') {
     commandState[userId] = { type: 'stats' };
-    bot.sendMessage(chatId, 'Reply: "this month" or "last month"');
+    bot.sendMessage(chatId, '📊 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
+  } else if (['/this_month', '/last_month', '/this_quarter', '/this_year', '/all'].includes(command)) {
+    const period = command.slice(1);
+    const state = commandState[userId];
+    
+    if (state && state.type === 'stats') {
+      delete commandState[userId];
+      await showStats(chatId, userId, period);
+    } else {
+      delete commandState[userId];
+      await downloadInvoicesByPeriod(chatId, userId, period);
+    }
   } else if (command === '/agree' && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, 'agree');
   } else if (command === '/cancel' && onboardingState[userId]) {
@@ -300,22 +360,6 @@ async function handleCommandState(chatId, userId, text) {
       await showStats(chatId, userId, period);
     } else {
       bot.sendMessage(chatId, 'Please reply: "this month" or "last month"');
-    }
-  } else if (state.type === 'download') {
-    let period = null;
-    if (input.includes('this month')) {
-      period = 'this_month';
-    } else if (input.includes('last month')) {
-      period = 'last_month';
-    } else if (input === 'all') {
-      period = 'all';
-    }
-    
-    if (period) {
-      delete commandState[userId];
-      await downloadInvoicesByPeriod(chatId, userId, period);
-    } else {
-      bot.sendMessage(chatId, 'Please reply: "this month", "last month", or "all"');
     }
   }
 }
@@ -470,19 +514,72 @@ function showProfile(chatId, userId) {
     bot.sendMessage(chatId, 'No profile. Use /setup');
     return;
   }
-  bot.sendMessage(chatId, 'Company: ' + p.company_name + '\nCurrency: ' + p.currency);
+  
+  let msg = '👤 YOUR PROFILE\n';
+  msg += '═════════════════════════\n\n';
+  
+  msg += '🏢 COMPANY DETAILS\n';
+  msg += '───────────────────────\n';
+  msg += '📛 Name: ' + (p.company_name || 'N/A') + '\n';
+  msg += '📍 Address: ' + (p.company_address || 'N/A') + '\n';
+  msg += '🔐 TRN: ' + (p.trn || 'Not provided') + '\n\n';
+  
+  msg += '💰 INVOICE SETTINGS\n';
+  msg += '───────────────────────\n';
+  msg += '💵 Currency: ' + (p.currency || 'N/A') + '\n';
+  
+  if (p.currency === 'INR') {
+    msg += '📊 GST Enabled: ' + (p.gst_enabled ? 'Yes ✅' : 'No ❌') + '\n';
+    if (p.gst_enabled) {
+      msg += '📈 GST Rate: ' + (p.gst_rate || '0') + '%\n';
+    }
+  } else {
+    msg += '📊 VAT Enabled: ' + (p.vat_enabled ? 'Yes ✅' : 'No ❌') + '\n';
+    if (p.vat_enabled) {
+      msg += '📈 VAT Rate: ' + (p.vat_rate || '0') + '%\n';
+    }
+  }
+  msg += '\n';
+  
+  msg += '🏦 BANK DETAILS\n';
+  msg += '───────────────────────\n';
+  msg += '🏛️  Bank: ' + (p.bank_name || 'N/A') + '\n';
+  msg += '🔑 IBAN: ' + (p.iban || 'N/A') + '\n';
+  msg += '👁️  Account: ' + (p.account_name || 'N/A') + '\n\n';
+  
+  msg += '📎 LOGO: ' + (p.logo_path ? '✅ Uploaded' : '❌ Not set') + '\n';
+  msg += '═════════════════════════\n\n';
+  msg += '💡 To update your profile, use /setup again';
+  
+  bot.sendMessage(chatId, msg);
 }
 
 async function showInvoiceHistory(chatId, userId) {
   const invs = invoiceHistory[userId] || [];
   if (invs.length === 0) {
-    bot.sendMessage(chatId, 'No invoices yet');
+    bot.sendMessage(chatId, '📋 No invoices yet');
     return;
   }
-  let msg = 'Invoices: ' + invs.length + '\n\n';
-  invs.slice(-5).reverse().forEach(inv => {
-    msg += inv.invoice_id + '\n' + inv.customer_name + '\n' + inv.total + ' ' + inv.currency + '\n\n';
+  
+  const recentInvoices = invs.slice(-5).reverse();
+  
+  let msg = '📊 Recent Invoices';
+  msg += ` - Total: ${invs.length}\n`;
+  msg += '═════════════════════════\n\n';
+  
+  recentInvoices.forEach((inv, idx) => {
+    const customerName = inv.customer_name && inv.customer_name.trim() ? inv.customer_name : 'N/A';
+    const amount = parseFloat(inv.total) > 0 ? inv.total : '0.00';
+    
+    msg += `${idx > 0 ? '\n' : ''}📄 ${inv.invoice_id}\n`;
+    msg += `   👤 ${customerName}\n`;
+    msg += `   💰 ${amount} ${inv.currency}\n`;
+    msg += `   📅 ${inv.date}\n`;
   });
+  
+  msg += '\n═════════════════════════\n\n';
+  msg += '📥 Use /download to download invoices';
+  
   bot.sendMessage(chatId, msg);
 }
 
@@ -491,11 +588,18 @@ function filterInvoicesByPeriod(invoices, period) {
   return invoices.filter(inv => {
     const parts = inv.date.split('/');
     const invDate = new Date(parts[2], parts[1] - 1, parts[0]);
+    
     if (period === 'this_month') {
       return invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear();
     } else if (period === 'last_month') {
       const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       return invDate.getMonth() === last.getMonth() && invDate.getFullYear() === last.getFullYear();
+    } else if (period === 'this_quarter') {
+      const currentQuarter = Math.floor(now.getMonth() / 3);
+      const invQuarter = Math.floor(invDate.getMonth() / 3);
+      return invQuarter === currentQuarter && invDate.getFullYear() === now.getFullYear();
+    } else if (period === 'this_year') {
+      return invDate.getFullYear() === now.getFullYear();
     }
     return true;
   });
@@ -504,17 +608,33 @@ function filterInvoicesByPeriod(invoices, period) {
 async function showStats(chatId, userId, period) {
   const invs = invoiceHistory[userId] || [];
   if (invs.length === 0) {
-    bot.sendMessage(chatId, 'No invoices');
+    bot.sendMessage(chatId, '📊 No invoices');
     return;
   }
   const filtered = filterInvoicesByPeriod(invs, period);
   if (filtered.length === 0) {
-    bot.sendMessage(chatId, 'No invoices for period');
+    bot.sendMessage(chatId, '📊 No invoices for period');
     return;
   }
   let total = 0;
   filtered.forEach(inv => total += parseFloat(inv.total));
-  bot.sendMessage(chatId, 'Invoices: ' + filtered.length + '\nTotal: ' + total.toFixed(2));
+  
+  const periodNames = {
+    'this_month': 'This Month',
+    'last_month': 'Last Month',
+    'this_quarter': 'This Quarter',
+    'this_year': 'This Year',
+    'all': 'All Time'
+  };
+  
+  let msg = '📊 Statistics - ' + (periodNames[period] || period) + '\n';
+  msg += '═════════════════════════\n\n';
+  msg += '📄 Total Invoices: ' + filtered.length + '\n';
+  msg += '💰 Total Amount: ' + total.toFixed(2) + '\n';
+  msg += '💵 Average Invoice: ' + (total / filtered.length).toFixed(2) + '\n';
+  msg += '\n═════════════════════════';
+  
+  bot.sendMessage(chatId, msg);
 }
 
 function generateInvoiceCSV(invoices) {
@@ -607,6 +727,14 @@ async function processInvoiceRequest(chatId, userId, text) {
     } catch (parseError) {
       bot.sendMessage(chatId, 'Could not parse invoice data. Try again with clearer details.');
       console.error('JSON Parse Error:', cleanJson);
+      return;
+    }
+    
+    // Validate extracted data
+    const validation = validateExtractedData(data);
+    if (!validation.valid) {
+      const errorMsg = '❌ Invoice validation failed:\n\n' + validation.errors.map(e => '• ' + e).join('\n') + '\n\nPlease provide: customer name, service description, and amount.';
+      bot.sendMessage(chatId, errorMsg);
       return;
     }
     
