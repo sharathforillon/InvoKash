@@ -1,31 +1,49 @@
 require('dotenv').config();
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const PDFDocument = require('pdfkit');
-const fs = require('fs');
-const path = require('path');
 const { createPaymentLink } = require("./payments");
 const OpenAI = require('openai');
 const archiver = require('archiver');
+const nodemailer = require('nodemailer');
+const TelegramBot = require('node-telegram-bot-api');
+const PDFDocument = require('pdfkit');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT || 587;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM;
 
-if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY || !OPENAI_API_KEY) {
-  console.error('ERROR: Missing environment variables!');
-  process.exit(1);
+if (!TELEGRAM_TOKEN) throw new Error('TELEGRAM_TOKEN is required');
+if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
+
+const BASE_DIR = path.join(__dirname, 'data');
+const INVOICE_DIR = path.join(BASE_DIR, 'invoices');
+const DATA_DIR = path.join(BASE_DIR, 'store');
+const BACKUP_DIR = path.join(BASE_DIR, 'backups');
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+
+// ─── FIX 1: Initialize emailTransporter if SMTP env vars are present ───────────
+let emailTransporter = null;
+if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  emailTransporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: parseInt(SMTP_PORT),
+    secure: parseInt(SMTP_PORT) === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS
+    }
+  });
 }
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-const BASE_DIR = __dirname;
-const INVOICE_DIR = path.join(BASE_DIR, 'invoices');
-const DATA_DIR = path.join(BASE_DIR, 'data');
-const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
-const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
-const BACKUP_DIR = path.join(BASE_DIR, 'backups');
 
 let companyProfiles = {};
 let onboardingState = {};
@@ -104,6 +122,7 @@ function showWelcomeMessage(chatId, userId) {
 📱 COMMANDS:
 /stats - View monthly statistics
 /download - Download all invoices
+/email - Send invoices to your email
 /invoices - View invoice list
 /profile - View your profile
 
@@ -315,20 +334,38 @@ async function handleCommand(chatId, userId, command) {
   } else if (command === '/download') {
     commandState[userId] = { type: 'download' };
     bot.sendMessage(chatId, '📥 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
+  } else if (command === '/email') {
+    if (!companyProfiles[userId]) {
+      bot.sendMessage(chatId, 'Use /setup first.');
+      return;
+    }
+    if (!companyProfiles[userId].email) {
+      commandState[userId] = { type: 'email_prompt' };
+      bot.sendMessage(chatId, '📧 Please provide your email address to receive invoices:');
+    } else {
+      commandState[userId] = { type: 'email' };
+      bot.sendMessage(chatId, '📧 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
+    }
   } else if (command === '/stats') {
     commandState[userId] = { type: 'stats' };
     bot.sendMessage(chatId, '📊 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
+
+  // ─── FIX 2: Route period commands to email/stats/download correctly ──────────
   } else if (['/this_month', '/last_month', '/this_quarter', '/this_year', '/all'].includes(command)) {
     const period = command.slice(1);
     const state = commandState[userId];
-    
+
     if (state && state.type === 'stats') {
       delete commandState[userId];
       await showStats(chatId, userId, period);
+    } else if (state && state.type === 'email') {
+      delete commandState[userId];
+      await emailInvoicesByPeriod(chatId, userId, period);
     } else {
       delete commandState[userId];
       await downloadInvoicesByPeriod(chatId, userId, period);
     }
+
   } else if (command === '/agree' && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, 'agree');
   } else if (command === '/cancel' && onboardingState[userId]) {
@@ -336,7 +373,7 @@ async function handleCommand(chatId, userId, command) {
     bot.sendMessage(chatId, 'Setup cancelled.');
   } else if (command === '/skip' && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, 'skip');
-  } else if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP'].includes(command.slice(1).toUpperCase()) && onboardingState[userId]) {
+  } else if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP', 'CAD'].includes(command.slice(1).toUpperCase()) && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, command.slice(1).toUpperCase());
   } else if (['/Yes', '/No'].includes(command) && onboardingState[userId]) {
     await handleOnboarding(chatId, userId, command.slice(1).toLowerCase());
@@ -347,7 +384,38 @@ async function handleCommandState(chatId, userId, text) {
   const state = commandState[userId];
   const input = text.toLowerCase();
 
-  if (state.type === 'stats') {
+  if (state.type === 'email_prompt') {
+    const email = text.trim();
+    if (/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/.test(email)) {
+      companyProfiles[userId].email = email;
+      saveData();
+      delete commandState[userId];
+      commandState[userId] = { type: 'email' };
+      bot.sendMessage(chatId, '✅ Email saved!\n\n📧 Select period:\n\n/this_month\n/last_month\n/this_quarter\n/this_year\n/all');
+    } else {
+      bot.sendMessage(chatId, '❌ Invalid email format. Please try again.');
+    }
+  } else if (state.type === 'email') {
+    let period = null;
+    if (input.includes('this month')) {
+      period = 'this_month';
+    } else if (input.includes('last month')) {
+      period = 'last_month';
+    } else if (input.includes('this quarter')) {
+      period = 'this_quarter';
+    } else if (input.includes('this year')) {
+      period = 'this_year';
+    } else if (input.includes('all')) {
+      period = 'all';
+    }
+    
+    if (period) {
+      delete commandState[userId];
+      await emailInvoicesByPeriod(chatId, userId, period);
+    } else {
+      bot.sendMessage(chatId, 'Please select a valid period.');
+    }
+  } else if (state.type === 'stats') {
     let period = null;
     if (input.includes('this month')) {
       period = 'this_month';
@@ -407,7 +475,6 @@ async function handleOnboarding(chatId, userId, text) {
   if (!companyProfiles[userId]) companyProfiles[userId] = {};
 
   if (state.step === 'disclaimer') {
-    // Only /agree command is accepted at disclaimer step
     onboardingState[userId].step = 'company_name';
     bot.sendMessage(chatId, 'Company name?');
   } else if (state.step === 'company_name') {
@@ -425,10 +492,10 @@ async function handleOnboarding(chatId, userId, text) {
       companyProfiles[userId].trn = sanitizeInput(text);
     }
     onboardingState[userId].step = 'currency';
-    bot.sendMessage(chatId, 'Which Currency will you invoice in:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP');
+    bot.sendMessage(chatId, 'Which Currency will you invoice in:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP\n/CAD');
   } else if (state.step === 'currency') {
     const curr = input.toUpperCase();
-    if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP'].includes(curr)) {
+    if (['AED', 'USD', 'EUR', 'INR', 'SAR', 'GBP', 'CAD'].includes(curr)) {
       companyProfiles[userId].currency = curr;
       if (curr === 'INR') {
         onboardingState[userId].step = 'gst_enabled';
@@ -438,7 +505,7 @@ async function handleOnboarding(chatId, userId, text) {
         bot.sendMessage(chatId, 'Bank name?');
       }
     } else {
-      bot.sendMessage(chatId, 'Please select a valid currency:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP');
+      bot.sendMessage(chatId, 'Please select a valid currency:\n/AED\n/USD\n/EUR\n/INR\n/SAR\n/GBP\n/CAD');
     }
   } else if (state.step === 'bank_name') {
     companyProfiles[userId].bank_name = sanitizeInput(text);
@@ -500,10 +567,27 @@ async function handleOnboarding(chatId, userId, text) {
   } else if (state.step === 'logo') {
     if (input === 'skip') {
       companyProfiles[userId].logo_path = null;
+      onboardingState[userId].step = 'email';
+      bot.sendMessage(chatId, 'Email for invoice delivery (or /skip):');
+    }
+  } else if (state.step === 'email') {
+    if (input === 'skip') {
+      companyProfiles[userId].email = null;
       delete onboardingState[userId];
       saveData();
       bot.sendMessage(chatId, 'Setup complete!');
       showWelcomeMessage(chatId, userId);
+    } else {
+      const email = text.trim();
+      if (/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/.test(email)) {
+        companyProfiles[userId].email = email;
+        delete onboardingState[userId];
+        saveData();
+        bot.sendMessage(chatId, 'Setup complete!');
+        showWelcomeMessage(chatId, userId);
+      } else {
+        bot.sendMessage(chatId, '❌ Invalid email. Please try again or /skip');
+      }
     }
   }
 }
@@ -548,6 +632,7 @@ function showProfile(chatId, userId) {
   msg += '👁️  Account: ' + (p.account_name || 'N/A') + '\n\n';
   
   msg += '📎 LOGO: ' + (p.logo_path ? '✅ Uploaded' : '❌ Not set') + '\n';
+  msg += '📧 EMAIL: ' + (p.email ? '✅ ' + p.email : '❌ Not set') + '\n';
   msg += '═════════════════════════\n\n';
   msg += '💡 To update your profile, use /setup again';
   
@@ -578,7 +663,7 @@ async function showInvoiceHistory(chatId, userId) {
   });
   
   msg += '\n═════════════════════════\n\n';
-  msg += '📥 Use /download to download invoices';
+  msg += '📥 Use /download to download invoices\n📧 Use /email to send invoices to your email';
   
   bot.sendMessage(chatId, msg);
 }
@@ -641,7 +726,6 @@ function generateInvoiceCSV(invoices) {
   let csv = 'Invoice ID,Date,Customer Name,Service Description,Subtotal,Tax Amount,Total,Currency\n';
   
   invoices.forEach(inv => {
-    // Escape quotes in fields and wrap in quotes if contains comma
     const escape = (str) => {
       if (!str) return '';
       str = str.toString().replace(/"/g, '""');
@@ -674,10 +758,12 @@ async function downloadInvoicesByPeriod(chatId, userId, period) {
   
   try {
     bot.sendMessage(chatId, 'Creating ZIP...');
-    const zipPath = '/tmp/invoices_' + userId + '_' + Date.now() + '.zip';
-    const csvPath = '/tmp/invoices_' + userId + '_' + Date.now() + '.csv';
+
+    // ─── FIX 3: Single timestamp to avoid path collision ──────────────────────
+    const ts = Date.now();
+    const zipPath = '/tmp/invoices_' + userId + '_' + ts + '.zip';
+    const csvPath = '/tmp/invoices_' + userId + '_' + ts + '_data.csv';
     
-    // Generate CSV file
     const csvContent = generateInvoiceCSV(filtered);
     fs.writeFileSync(csvPath, csvContent);
     
@@ -689,11 +775,7 @@ async function downloadInvoicesByPeriod(chatId, userId, period) {
       fs.unlinkSync(csvPath);
     });
     archive.pipe(output);
-    
-    // Add CSV file to archive
     archive.file(csvPath, { name: 'invoices.csv' });
-    
-    // Add PDF files to archive
     filtered.forEach(inv => {
       if (fs.existsSync(inv.file_path)) {
         archive.file(inv.file_path, { name: path.basename(inv.file_path) });
@@ -703,6 +785,91 @@ async function downloadInvoicesByPeriod(chatId, userId, period) {
   } catch (error) {
     bot.sendMessage(chatId, 'Error');
   }
+}
+
+async function emailInvoicesByPeriod(chatId, userId, period) {
+  const invs = invoiceHistory[userId] || [];
+  const filtered = filterInvoicesByPeriod(invs, period);
+  if (filtered.length === 0) {
+    bot.sendMessage(chatId, 'No invoices');
+    return;
+  }
+  
+  if (!emailTransporter) {
+    bot.sendMessage(chatId, 'Email service not configured. Contact administrator.');
+    return;
+  }
+  
+  try {
+    bot.sendMessage(chatId, 'Preparing email...');
+    const profile = companyProfiles[userId];
+    const userEmail = profile.email;
+    
+    if (!userEmail) {
+      bot.sendMessage(chatId, 'No email on file. Use /email to add one.');
+      return;
+    }
+
+    // ─── FIX 3: Single timestamp to avoid path collision ──────────────────────
+    const ts = Date.now();
+    const zipPath = '/tmp/invoices_' + userId + '_' + ts + '.zip';
+    const csvPath = '/tmp/invoices_' + userId + '_' + ts + '_data.csv';
+    
+    const csvContent = generateInvoiceCSV(filtered);
+    fs.writeFileSync(csvPath, csvContent);
+    
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver('zip');
+    
+    archive.pipe(output);
+    archive.file(csvPath, { name: 'invoices.csv' });
+    filtered.forEach(inv => {
+      if (fs.existsSync(inv.file_path)) {
+        archive.file(inv.file_path, { name: path.basename(inv.file_path) });
+      }
+    });
+    
+    await archive.finalize();
+    
+    await new Promise((resolve) => {
+      output.on('close', resolve);
+    });
+    
+    await sendEmailWithInvoices(userEmail, zipPath, filtered.length, profile.company_name);
+    
+    bot.sendMessage(chatId, '✅ ' + filtered.length + ' invoices sent to ' + userEmail);
+    
+    fs.unlinkSync(zipPath);
+    fs.unlinkSync(csvPath);
+  } catch (error) {
+    console.error('Email error:', error.message);
+    bot.sendMessage(chatId, 'Error sending email: ' + error.message);
+  }
+}
+
+async function sendEmailWithInvoices(userEmail, zipPath, invoiceCount, companyName) {
+  const mailOptions = {
+    from: SMTP_FROM || SMTP_USER,
+    to: userEmail,
+    subject: 'Your ' + invoiceCount + ' Invoice(s) from InvoKash',
+    html: `
+      <h2>Your Invoices – ${companyName || 'InvoKash'}</h2>
+      <p>Please find attached <strong>${invoiceCount} invoice(s)</strong> in ZIP format.</p>
+      <p>The ZIP file contains:</p>
+      <ul>
+        <li>Individual PDF invoices</li>
+        <li><code>invoices.csv</code> – Summary of all invoices</li>
+      </ul>
+      <br>
+      <p>Best regards,<br>InvoKash Team</p>
+    `,
+    attachments: [{
+      filename: 'invoices_' + Date.now() + '.zip',
+      path: zipPath
+    }]
+  };
+  
+  await emailTransporter.sendMail(mailOptions);
 }
 
 async function processInvoiceRequest(chatId, userId, text) {
@@ -716,7 +883,6 @@ async function processInvoiceRequest(chatId, userId, text) {
     );
 
     let cleanJson = response.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
-    // Extract JSON if wrapped in extra text
     const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       cleanJson = jsonMatch[0];
@@ -730,7 +896,6 @@ async function processInvoiceRequest(chatId, userId, text) {
       return;
     }
     
-    // Validate extracted data
     const validation = validateExtractedData(data);
     if (!validation.valid) {
       const errorMsg = '❌ Invoice validation failed:\n\n' + validation.errors.map(e => '• ' + e).join('\n') + '\n\nPlease provide: customer name, service description, and amount.';
@@ -740,14 +905,12 @@ async function processInvoiceRequest(chatId, userId, text) {
     
     const profile = companyProfiles[userId];
     
-    // Calculate subtotal from all line items
     let subtotal = 0;
     if (data.line_items && Array.isArray(data.line_items)) {
       data.line_items.forEach(item => {
         subtotal += parseFloat(item.amount) || 0;
       });
     } else {
-      // Fallback for old format
       subtotal = parseFloat(data.amount) || 0;
       data.line_items = [{ description: data.service, amount: subtotal }];
     }
@@ -799,7 +962,6 @@ async function processInvoiceRequest(chatId, userId, text) {
 
     saveData();
     
-    // Create Stripe payment link
     const paymentResult = await createPaymentLink({
       invoice_id: invoiceId,
       customer_name: data.customer_name,
@@ -864,7 +1026,6 @@ async function generateProfessionalInvoice(data) {
     y += 20;
     doc.font('Helvetica');
     
-    // Render each line item
     if (data.line_items && Array.isArray(data.line_items)) {
       data.line_items.forEach(item => {
         doc.text(item.description, 50, y, {width: 300}).text(parseFloat(item.amount).toFixed(2), 400, y);
@@ -884,7 +1045,7 @@ async function generateProfessionalInvoice(data) {
     }
     doc.moveTo(350, y).lineTo(550, y).stroke();
     y += 15;
-    doc.font('Helvetica-Bold').fontSize(12).text('TOTAL:', 350, y).text(data.total, 480, y);
+    doc.font('Helvetica-Bold').fontSize(12).text('TOTAL:', 350, y).text(data.total + ' ' + data.currency, 480, y);
     y += 40;
     doc.fontSize(10).text('PAYMENT:', 50, y);
     y += 20;
@@ -904,4 +1065,3 @@ bot.on('polling_error', (error) => console.error('Error:', error.message));
 process.on('SIGINT', () => { saveData(); process.exit(0); });
 setInterval(saveData, 5 * 60 * 1000);
 console.log('Ready!');
-
