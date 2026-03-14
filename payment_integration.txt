@@ -1,0 +1,21 @@
+    saveData();
+    
+    // Create Stripe payment link
+    const paymentResult = await createPaymentLink({
+      invoice_id: invoiceId,
+      customer_name: data.customer_name,
+      total: total.toFixed(2),
+      currency: profile.currency
+    });
+    
+    let caption = `📄 ${invoiceId}\n💰 ${total.toFixed(2)} ${profile.currency}`;
+    
+    if (paymentResult.success) {
+      caption += `\n\n💳 PAY NOW:\n${paymentResult.paymentUrl}\n\n✅ Supports Credit/Debit Cards & Apple Pay`;
+      // Store payment link in history
+      invoiceHistory[userId][invoiceHistory[userId].length - 1].payment_link = paymentResult.paymentUrl;
+      saveData();
+    }
+    
+    await bot.sendDocument(chatId, pdfPath, { caption: caption });
+    fs.unlinkSync(pdfPath);
