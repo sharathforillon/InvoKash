@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+data/
+invoices/
+backups/
+*.log
+node_modules/
+/tmp/
+*.tmp
