@@ -1,410 +1,301 @@
+/**
+ * InvoKash — Telegram Bot (v2)
+ * Enhanced UX: quick actions, invoice status, rich stats, voice support
+ */
+
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const PDFDocument = require('pdfkit');
-const fs = require('fs');
-const path = require('path');
-const { createPaymentLink } = require('./payments');
-const OpenAI = require('openai');
-const archiver = require('archiver');
+const axios       = require('axios');
+const fs          = require('fs');
+const path        = require('path');
 
-// ─── Environment Validation ───────────────────────────────────────────────────
-const TELEGRAM_TOKEN   = process.env.TELEGRAM_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const OPENAI_API_KEY   = process.env.OPENAI_API_KEY;
+const {
+  companyProfiles, invoiceHistory, onboardingState, commandState, pendingInvoices,
+  revenueGoals, expenseHistory,
+  CURRENCIES, PERIOD_NAMES, LOGO_DIR, EXPENSE_CATEGORIES,
+  checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
+  filterInvoicesByPeriod, progressBar, asciiBar, calculateStats,
+  classifyIntent, transcribeAudio, processInvoiceText, confirmInvoice,
+  markInvoicePaid, buildDownloadZip, saveData,
+  getLastInvoiceForCustomer, getAgingReport,
+  setRevenueGoal, getRevenueGoal,
+  generateBusinessInsights, generateClientStatement,
+  saveTemplate, getTemplates, deleteTemplate,
+  extractExpenseData, logExpense, getExpenses, calculateProfitLoss,
+} = require('./core');
 
-if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY || !OPENAI_API_KEY) {
-  console.error('ERROR: Missing required environment variables (TELEGRAM_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY)');
-  process.exit(1);
-}
+// ─── Bot Init ─────────────────────────────────────────────────────────────────
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
-const bot    = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+// Bot is initialized lazily in startTelegramBot()
+let bot;
 
-// ─── Paths ────────────────────────────────────────────────────────────────────
-const BASE_DIR      = __dirname;
-const INVOICE_DIR   = path.join(BASE_DIR, 'invoices');
-const DATA_DIR      = path.join(BASE_DIR, 'data');
-const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
-const HISTORY_FILE  = path.join(DATA_DIR, 'history.json');
-const BACKUP_DIR    = path.join(BASE_DIR, 'backups');
+// ─── Onboarding Config ────────────────────────────────────────────────────────
+const ONBOARD_TOTAL = 10;
 
-['/tmp/logos', INVOICE_DIR, DATA_DIR, BACKUP_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
+// ─── Currency paging state (for onboarding) ───────────────────────────────────
+const currencyPage = {}; // { userId: 0|1 }
 
-// ─── In-Memory State ──────────────────────────────────────────────────────────
-let companyProfiles  = {};
-let invoiceHistory   = {};
-let onboardingState  = {};   // { userId: { step, ... } }
-let commandState     = {};   // { userId: { type } }
-let pendingInvoices  = {};   // { userId: invoiceData } — awaiting user confirmation
-
-const userRateLimits = new Map();
-
-// ─── Currency Config ──────────────────────────────────────────────────────────
-const CURRENCIES = {
-  AED: { symbol: 'AED', flag: '🇦🇪', name: 'UAE Dirham',      tax: 'VAT', right: true },
-  USD: { symbol: '$',   flag: '🇺🇸', name: 'US Dollar',        tax: 'VAT', right: false },
-  EUR: { symbol: '€',   flag: '🇪🇺', name: 'Euro',             tax: 'VAT', right: false },
-  INR: { symbol: '₹',   flag: '🇮🇳', name: 'Indian Rupee',     tax: 'GST', right: false },
-  SAR: { symbol: 'SAR', flag: '🇸🇦', name: 'Saudi Riyal',      tax: 'VAT', right: true  },
-  GBP: { symbol: '£',   flag: '🇬🇧', name: 'British Pound',    tax: 'VAT', right: false },
-};
-
-// ─── Data Persistence ─────────────────────────────────────────────────────────
-function loadData() {
+// ─── Helper: safe sendMessage ─────────────────────────────────────────────────
+async function send(chatId, text, opts = {}) {
   try {
-    if (fs.existsSync(PROFILES_FILE)) companyProfiles = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
-    if (fs.existsSync(HISTORY_FILE))  invoiceHistory  = JSON.parse(fs.readFileSync(HISTORY_FILE,  'utf8'));
-  } catch (err) { console.error('Load error:', err.message); }
-}
-
-function saveData() {
-  try {
-    fs.writeFileSync(PROFILES_FILE, JSON.stringify(companyProfiles, null, 2));
-    fs.writeFileSync(HISTORY_FILE,  JSON.stringify(invoiceHistory,  null, 2));
-  } catch (err) { console.error('Save error:', err.message); }
-}
-
-loadData();
-console.log('InvoKash Bot starting...');
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function checkRateLimit(userId) {
-  const now   = Date.now();
-  const limit = userRateLimits.get(userId) || { count: 0, resetTime: now + 60000 };
-  if (now > limit.resetTime) { limit.count = 0; limit.resetTime = now + 60000; }
-  limit.count++;
-  userRateLimits.set(userId, limit);
-  return limit.count <= 20;
-}
-
-function sanitizeInput(input) {
-  if (typeof input !== 'string') return '';
-  return input.replace(/[<>]/g, '').trim().slice(0, 500);
-}
-
-function formatAmount(amount, currency) {
-  const cfg = CURRENCIES[currency];
-  const num = parseFloat(amount).toFixed(2);
-  if (!cfg) return `${currency} ${num}`;
-  return cfg.right ? `${num} ${cfg.symbol}` : `${cfg.symbol}${num}`;
-}
-
-function progressBar(step, total) {
-  const filled = Math.round((step / total) * 8);
-  return `[${'█'.repeat(filled)}${'░'.repeat(8 - filled)}] Step ${step}/${total}`;
-}
-
-function getTaxConfig(profile) {
-  if (profile.currency === 'INR') {
-    return { enabled: !!profile.gst_enabled, rate: profile.gst_rate || 0, type: 'GST', field: 'gst' };
-  }
-  return { enabled: !!profile.vat_enabled, rate: profile.vat_rate || 0, type: 'VAT', field: 'vat' };
-}
-
-// ─── Main Message Handler ─────────────────────────────────────────────────────
-bot.on('message', async (msg) => {
-  const chatId    = msg.chat.id;
-  const userId    = String(msg.from.id);
-  const text      = msg.text;
-  const firstName = msg.from.first_name || 'there';
-
-  if (!checkRateLimit(userId)) {
-    bot.sendMessage(chatId, '⏱ Too many requests — please wait a moment and try again.');
-    return;
-  }
-
-  try {
-    // Commands
-    if (text && text.startsWith('/')) {
-      await handleCommand(chatId, userId, text, firstName);
-      return;
-    }
-
-    // Logo upload during onboarding
-    if (msg.photo && onboardingState[userId]?.step === 'logo') {
-      await handleLogoUpload(chatId, userId, msg.photo);
-      return;
-    }
-
-    // Not set up yet
-    if (!companyProfiles[userId] && !onboardingState[userId]) {
-      await bot.sendMessage(chatId,
-        `👋 Hi *${firstName}*! I'm *InvoKash* — your AI invoice assistant.\n\n` +
-        `Create professional invoices in seconds using voice or text, and collect payments instantly.\n\n` +
-        `Let's get your business set up first!`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[
-            { text: '🚀 Set Up My Account', callback_data: 'cmd_setup' },
-            { text: '❓ How It Works',       callback_data: 'cmd_help'  }
-          ]]}
-        }
-      );
-      return;
-    }
-
-    // Voice message
-    if (msg.voice) {
-      await handleVoiceMessage(chatId, userId, msg.voice, firstName);
-      return;
-    }
-
-    // Active onboarding flow
-    if (onboardingState[userId]) {
-      await handleOnboarding(chatId, userId, text);
-      return;
-    }
-
-    // Active command state (period selection via text)
-    if (commandState[userId]) {
-      await handleCommandState(chatId, userId, text);
-      return;
-    }
-
-    // Free-text invoice / command
-    if (text) {
-      await handleTextMessage(chatId, userId, text, firstName);
-    }
-
+    return await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', ...opts });
   } catch (err) {
-    console.error('Message handler error:', err);
-    bot.sendMessage(chatId, '⚠️ Something went wrong. Please try again or use /help.');
+    if (err.code !== 'ETELEGRAM') console.error('Send error:', err.message);
   }
-});
-
-// ─── Callback Query Handler (Inline Keyboards) ────────────────────────────────
-bot.on('callback_query', async (query) => {
-  const chatId    = query.message.chat.id;
-  const userId    = String(query.from.id);
-  const data      = query.data;
-  const firstName = query.from.first_name || 'there';
-
-  await bot.answerCallbackQuery(query.id);
-
-  if (!checkRateLimit(userId)) return;
-
-  try {
-    // ── Setup actions ──
-    if      (data === 'cmd_setup')    { startOnboarding(chatId, userId, firstName); }
-    else if (data === 'cmd_help')     { showHelp(chatId); }
-    else if (data === 'setup_agree')  { await handleOnboarding(chatId, userId, 'agree'); }
-    else if (data === 'setup_cancel') {
-      delete onboardingState[userId];
-      bot.sendMessage(chatId, '❌ Setup cancelled. Use /setup to start again any time.');
-    }
-    else if (data === 'setup_skip')   { await handleOnboarding(chatId, userId, 'skip'); }
-    else if (data.startsWith('currency_')) {
-      await handleOnboarding(chatId, userId, data.replace('currency_', ''));
-    }
-    else if (data === 'tax_yes')      { await handleOnboarding(chatId, userId, 'yes'); }
-    else if (data === 'tax_no')       { await handleOnboarding(chatId, userId, 'no'); }
-
-    // ── Stats / Download period selection ──
-    else if (data.startsWith('stats_')) {
-      delete commandState[userId];
-      await showStats(chatId, userId, data.replace('stats_', ''));
-    }
-    else if (data.startsWith('dl_')) {
-      delete commandState[userId];
-      await downloadInvoicesByPeriod(chatId, userId, data.replace('dl_', ''));
-    }
-
-    // ── Invoice confirmation ──
-    else if (data === 'confirm_invoice') { await confirmAndGenerateInvoice(chatId, userId); }
-    else if (data === 'retry_invoice') {
-      delete pendingInvoices[userId];
-      bot.sendMessage(chatId,
-        '🔄 No problem! Please re-describe your invoice.\n\n' +
-        'Example: _"Web design for Acme Corp for 3000"_',
-        { parse_mode: 'Markdown' }
-      );
-    }
-
-    // ── Navigation shortcuts ──
-    else if (data === 'nav_invoices') { await showInvoiceHistory(chatId, userId); }
-    else if (data === 'nav_stats')    { await showPeriodSelector(chatId, userId, 'stats'); }
-    else if (data === 'nav_profile')  { showProfile(chatId, userId); }
-    else if (data === 'nav_download') { await showPeriodSelector(chatId, userId, 'download'); }
-    else if (data === 'nav_home')     { showWelcomeMessage(chatId, userId, firstName); }
-
-    // ── Delete data ──
-    else if (data === 'deletedata_confirm') {
-      delete companyProfiles[userId];
-      delete invoiceHistory[userId];
-      saveData();
-      bot.sendMessage(chatId, '🗑 All your data has been permanently deleted.\n\nUse /setup to start fresh any time.');
-    }
-    else if (data === 'deletedata_cancel') {
-      bot.sendMessage(chatId, '✅ Your data is safe. Nothing was deleted.');
-    }
-
-  } catch (err) {
-    console.error('Callback query error:', err);
-    bot.sendMessage(chatId, '⚠️ Something went wrong. Please try again.');
-  }
-});
+}
 
 // ─── Command Handler ──────────────────────────────────────────────────────────
 async function handleCommand(chatId, userId, command, firstName) {
-  const cmd = command.split(' ')[0].toLowerCase();
+  const cmd = command.split(' ')[0].toLowerCase().split('@')[0];
 
   switch (cmd) {
-    case '/start':      showWelcomeMessage(chatId, userId, firstName);               break;
-    case '/setup':      startOnboarding(chatId, userId, firstName);                  break;
-    case '/help':       showHelp(chatId);                                             break;
-    case '/profile':    showProfile(chatId, userId);                                  break;
-    case '/invoices':   await showInvoiceHistory(chatId, userId);                    break;
-    case '/customers':  showCustomers(chatId, userId);                               break;
-    case '/stats':      await showPeriodSelector(chatId, userId, 'stats');           break;
-    case '/download':   await showPeriodSelector(chatId, userId, 'download');        break;
-    case '/deletedata': await confirmDeleteData(chatId, userId);                     break;
+    case '/start':     return showWelcome(chatId, userId, firstName);
+    case '/setup':     return startOnboarding(chatId, userId, firstName);
+    case '/help':      return showHelp(chatId);
+    case '/profile':   return showProfile(chatId, userId);
+    case '/invoices':  return showInvoices(chatId, userId);
+    case '/customers': return showCustomers(chatId, userId);
+    case '/stats':     return showPeriodSelector(chatId, userId, 'stats');
+    case '/download':  return showPeriodSelector(chatId, userId, 'download');
+    case '/deletedata':return confirmDeleteData(chatId, userId);
+    case '/aging':     return showAgingDashboard(chatId, userId);
+    case '/goal':      return showGoalSetter(chatId, userId);
+    case '/statement': return selectClientForStatement(chatId, userId);
+    case '/templates': return showTemplates(chatId, userId);
+    case '/expenses':  return showExpenses(chatId, userId);
+    case '/profit':    return showProfitLoss(chatId, userId, 'this_month');
     case '/agree':
-      if (onboardingState[userId]) await handleOnboarding(chatId, userId, 'agree');
+      if (onboardingState[userId]) handleOnboarding(chatId, userId, 'agree');
       break;
     case '/cancel':
-      if (onboardingState[userId]) { delete onboardingState[userId]; bot.sendMessage(chatId, '❌ Setup cancelled.'); }
-      else if (commandState[userId]) { delete commandState[userId]; bot.sendMessage(chatId, '❌ Cancelled.'); }
+      if (onboardingState[userId])  { delete onboardingState[userId]; send(chatId, '❌ Setup cancelled.'); }
+      else if (commandState[userId]){ delete commandState[userId];    send(chatId, '❌ Cancelled.'); }
       break;
     case '/skip':
-      if (onboardingState[userId]) await handleOnboarding(chatId, userId, 'skip');
+      if (onboardingState[userId]) handleOnboarding(chatId, userId, 'skip');
       break;
     default:
-      // Legacy period commands
+      // Legacy text period commands
       if (['/this_month','/last_month','/this_quarter','/this_year','/all'].includes(cmd)) {
         const period = cmd.slice(1);
         const state  = commandState[userId];
         delete commandState[userId];
-        if (state?.type === 'stats') await showStats(chatId, userId, period);
-        else await downloadInvoicesByPeriod(chatId, userId, period);
+        if (state?.type === 'stats') showStats(chatId, userId, period);
+        else downloadInvoices(chatId, userId, period);
       }
   }
 }
 
-// ─── Welcome Screen ───────────────────────────────────────────────────────────
-function showWelcomeMessage(chatId, userId, firstName = 'there') {
+// ─── Landing / Welcome ────────────────────────────────────────────────────────
+async function showLanding(chatId, firstName) {
+  await send(chatId,
+    `✨ *Welcome to InvoKash* — Hi ${firstName}!\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Your AI invoice assistant that works by *voice or text* — no forms, no hassle.\n\n` +
+    `*Just say it. We'll invoice it.*\n\n` +
+    `🎤 _"Plumbing for Ahmed at Marina for 500"_\n` +
+    `📄 → Professional PDF invoice, instantly\n` +
+    `💳 → Stripe payment link, ready to share\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `🌍 *14 currencies* · AED · USD · EUR · GBP · INR · SAR · OMR · more\n` +
+    `🧾 VAT & GST compliant\n` +
+    `📊 Revenue stats & CSV export\n` +
+    `💬 Telegram + WhatsApp\n\n` +
+    `⏱ Setup takes *~2 minutes*`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '🚀 Set Up My Business Account', callback_data: 'cmd_setup' }],
+      [{ text: '❓ See How It Works',            callback_data: 'cmd_help'  }]
+    ]}}
+  );
+}
+
+function showWelcome(chatId, userId, firstName = 'there') {
   const profile = companyProfiles[userId];
   const history = invoiceHistory[userId] || [];
 
-  if (profile) {
-    const thisMonth  = filterInvoicesByPeriod(history, 'this_month');
-    const monthTotal = thisMonth.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
+  if (!profile) return showLanding(chatId, firstName);
 
-    let msg = `👋 Welcome back, *${profile.company_name}*!\n\n`;
+  const thisMonth  = filterInvoicesByPeriod(history, 'this_month');
+  const lastMonth  = filterInvoicesByPeriod(history, 'last_month');
+  const monthStats = calculateStats(thisMonth, profile.currency);
+  const lastStats  = calculateStats(lastMonth, profile.currency);
+  const allStats   = calculateStats(history, profile.currency);
+  const curr       = CURRENCIES[profile.currency] || {};
 
-    if (thisMonth.length > 0) {
-      msg += `📊 *This Month*\n`;
-      msg += `📄 ${thisMonth.length} invoice${thisMonth.length !== 1 ? 's' : ''} · `;
-      msg += `💰 ${formatAmount(monthTotal, profile.currency)}\n\n`;
-    }
+  // Month-over-month trend
+  const trend = lastStats.total > 0
+    ? (((monthStats.total - lastStats.total) / lastStats.total) * 100).toFixed(0)
+    : null;
+  const trendIcon = trend === null ? '' : parseFloat(trend) >= 0 ? `📈 +${trend}%` : `📉 ${trend}%`;
 
-    msg += `🎤 *Create an Invoice*\n`;
-    msg += `Just type or send a voice message:\n`;
-    msg += `_"Plumbing for Ahmed at Marina for 500"_\n`;
-    msg += `_"Consulting for Acme Corp for 3000"_\n\n`;
-    msg += `📱 /invoices · /stats · /download · /profile`;
+  let msg = `🏠 *${profile.company_name}*\n`;
+  msg += `${curr.flag || ''} ${profile.currency}`;
+  if (profile.company_address) msg += `  ·  ${profile.company_address}`;
+  msg += `\n\n`;
 
-    bot.sendMessage(chatId, msg, {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '📊 Stats',    callback_data: 'nav_stats'    },
-        { text: '📋 Invoices', callback_data: 'nav_invoices' },
-        { text: '👤 Profile',  callback_data: 'nav_profile'  },
-      ]]}
-    });
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
+  if (history.length === 0) {
+    msg += `🌟 *Ready to invoice!*\n\n`;
+    msg += `Create your first invoice right now:\n\n`;
   } else {
-    bot.sendMessage(chatId,
-      `👋 Welcome to *InvoKash*, ${firstName}!\n\n` +
-      `🚀 Create professional invoices in seconds — built for freelancers & SMEs across the Middle East, South Asia, and beyond.\n\n` +
-      `✅ Voice & text invoice creation\n` +
-      `✅ VAT / GST compliant\n` +
-      `✅ Instant Stripe payment links\n` +
-      `✅ PDF delivery on Telegram\n` +
-      `✅ Multi-currency: AED · USD · EUR · INR · SAR · GBP\n\n` +
-      `Let's get you set up in 2 minutes!`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[
-          { text: '🚀 Set Up My Account', callback_data: 'cmd_setup' }
-        ]]}
-      }
-    );
+    msg += `📊 *This Month*\n`;
+    msg += `📄 *${monthStats.count}* invoice${monthStats.count !== 1 ? 's' : ''}`;
+    if (trendIcon) msg += `   ${trendIcon}`;
+    msg += `\n`;
+    msg += `💰 *${formatAmount(monthStats.total, profile.currency)}* revenue\n`;
+    if (monthStats.paid > 0) msg += `✅ ${formatAmount(monthStats.paid, profile.currency)} collected\n`;
+    if (monthStats.unpaid > 0) msg += `⏳ ${formatAmount(monthStats.unpaid, profile.currency)} outstanding\n`;
+    msg += `\n`;
+    msg += `📈 *All Time:* ${formatAmount(allStats.total, profile.currency)} across ${allStats.count} invoices\n\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
   }
+
+  // Revenue goal progress
+  const goal = getRevenueGoal(userId);
+  if (goal && goal.monthly > 0) {
+    const pct = Math.min(100, Math.round((monthStats.total / goal.monthly) * 100));
+    const bar = asciiBar(monthStats.total, goal.monthly, 12);
+    msg += `🎯 *Monthly Goal*\n`;
+    msg += `${bar} ${pct}%\n`;
+    msg += `${formatAmount(monthStats.total, profile.currency)} of ${formatAmount(goal.monthly, profile.currency)}\n\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  }
+
+  msg += `🎤 *Create an Invoice*\n`;
+  msg += `_Just type or send a voice message:_\n\n`;
+  msg += `_"Website design for Acme Corp for 3500"_\n`;
+  msg += `_"Plumbing at Marina for Ahmed for 500"_`;
+
+  send(chatId, msg, {
+    reply_markup: { inline_keyboard: [
+      [
+        { text: '📊 Stats',      callback_data: 'nav_stats'     },
+        { text: '📋 Invoices',   callback_data: 'nav_invoices'  },
+      ],
+      [
+        { text: '👥 Customers',  callback_data: 'nav_customers' },
+        { text: '📥 Download',   callback_data: 'nav_download'  },
+      ],
+      [
+        { text: '⏱ Aging',      callback_data: 'nav_aging'     },
+        { text: '📈 P&L',       callback_data: 'nav_profit'    },
+      ],
+      [
+        { text: '👤 Profile',    callback_data: 'nav_profile'   },
+        { text: '🎯 Goal',       callback_data: 'nav_goal'      },
+      ]
+    ]}
+  });
 }
 
 // ─── Help ─────────────────────────────────────────────────────────────────────
 function showHelp(chatId) {
-  bot.sendMessage(chatId,
-    `📖 *InvoKash Help*\n\n` +
-    `*Creating Invoices*\nType or send a voice message:\n` +
-    `• _"Plumbing for Ahmed at Marina for 500"_\n` +
-    `• _"Web design for Acme Corp for 3000"_\n` +
-    `• _"Consulting, design, support for TechCo for 2500"_\n\n` +
-    `*Commands*\n` +
-    `/start — Home screen\n` +
-    `/setup — Set up or update your profile\n` +
-    `/profile — View your business profile\n` +
-    `/invoices — Recent invoices\n` +
-    `/customers — Customer list\n` +
-    `/stats — Revenue statistics\n` +
-    `/download — Download invoices (PDF + CSV)\n` +
-    `/deletedata — Delete all your data\n` +
-    `/help — This guide\n\n` +
-    `*Tips*\n` +
-    `• Always include customer name, service, and amount\n` +
-    `• Location is optional\n` +
-    `• Multiple services in one invoice: _"Design and hosting for Client for 2000"_\n\n` +
-    `*Support* — @InvoKashSupport`,
-    { parse_mode: 'Markdown' }
+  send(chatId,
+    `📖 *InvoKash — Help Guide*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*🎤 Creating Invoices*\n` +
+    `Just type or send a voice note — no forms!\n\n` +
+    `_"Plumbing for Ahmed at Marina for 500"_\n` +
+    `_"Web design for Acme Corp for 3000"_\n` +
+    `_"Design, hosting & support for TechCo for 2500"_\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*📋 Commands*\n` +
+    `/start — 🏠 Home dashboard\n` +
+    `/setup — ⚙️ Set up or update profile\n` +
+    `/profile — 👤 View business profile\n` +
+    `/invoices — 📋 Recent invoices + mark paid\n` +
+    `/customers — 👥 Customer directory\n` +
+    `/stats — 📊 Revenue analytics\n` +
+    `/download — 📥 Export PDF + CSV bundle\n` +
+    `/aging — ⏱ Invoice aging (30/60/90 days)\n` +
+    `/goal — 🎯 Set monthly revenue goal\n` +
+    `/statement — 📄 Client statement PDF\n` +
+    `/templates — 📌 Invoice templates\n` +
+    `/expenses — 💸 Track expenses\n` +
+    `/profit — 📈 Profit & loss report\n` +
+    `/deletedata — 🗑 Delete all your data\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*💡 Pro Tips*\n` +
+    `• Include: _customer name + service + amount_\n` +
+    `• Multi-item: _"Design and hosting for Client for 2000"_\n` +
+    `• Tap ✅ *Mark as Paid* when a client settles up\n` +
+    `• Voice messages work in any language!\n\n` +
+    `*🌍 Currencies*\n` +
+    `AED · USD · EUR · GBP · INR · SAR\n` +
+    `OMR · KWD · BHD · QAR · EGP · SGD · CAD · AUD\n\n` +
+    `*💬 Support:* @${process.env.SUPPORT_USERNAME || 'InvoKashSupport'}`,
+    { reply_markup: { inline_keyboard: [[
+      { text: '🏠 Home', callback_data: 'nav_home' },
+      { text: '⚙️ Setup', callback_data: 'cmd_setup' }
+    ]]}}
   );
 }
 
 // ─── Onboarding ───────────────────────────────────────────────────────────────
-const ONBOARD_TOTAL = 10;
-
 function startOnboarding(chatId, userId, firstName = 'there') {
   const isUpdate = !!companyProfiles[userId];
   onboardingState[userId] = { step: 'disclaimer' };
 
-  bot.sendMessage(chatId,
+  send(chatId,
     (isUpdate
       ? `⚙️ *Update Your Profile*\n\nThis will replace your current settings.\n\n`
-      : `🎉 *Let's set up your account, ${firstName}!*\n\n`) +
+      : `🎉 *Let\'s set up your account, ${firstName}!*\n\n`) +
     `⚠️ *Disclaimer*\n\n` +
     `InvoKash generates invoices for *record-keeping purposes only*. These are not legally certified tax documents.\n\n` +
     `By proceeding you confirm:\n` +
-    `• You are responsible for tax compliance in your country\n` +
-    `• Your data is stored securely and never shared\n` +
-    `• You can delete your data any time with /deletedata`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '✅ I Agree — Continue', callback_data: 'setup_agree'  },
-        { text: '❌ Cancel',             callback_data: 'setup_cancel' }
-      ]]}
-    }
+    `• You are responsible for tax compliance in your jurisdiction\n` +
+    `• Your data is stored securely and never shared with third parties\n` +
+    `• You can delete all data at any time with /deletedata`,
+    { reply_markup: { inline_keyboard: [[
+      { text: '✅ I Agree — Continue', callback_data: 'setup_agree'  },
+      { text: '❌ Cancel',             callback_data: 'setup_cancel' }
+    ]]}}
   );
 }
 
 async function handleLogoUpload(chatId, userId, photos) {
   try {
-    const photo   = photos[photos.length - 1];
-    const file    = await bot.getFile(photo.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
-    const res     = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-    const logoPath = `/tmp/logos/logo_${userId}.jpg`;
+    const photo    = photos[photos.length - 1];
+    const file     = await bot.getFile(photo.file_id);
+    const fileUrl  = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
+    const res      = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    const logoPath = path.join(LOGO_DIR, `logo_${userId}.jpg`);
     fs.writeFileSync(logoPath, Buffer.from(res.data));
     companyProfiles[userId].logo_path = logoPath;
+    saveData();
   } catch (err) {
     console.error('Logo upload error:', err.message);
     companyProfiles[userId].logo_path = null;
   }
   delete onboardingState[userId];
-  saveData();
   await sendSetupComplete(chatId, userId);
+}
+
+function showCurrencyPage(chatId, userId, page) {
+  const allCurrencies = Object.entries(CURRENCIES);
+  const perPage = 6;
+  const start = page * perPage;
+  const slice = allCurrencies.slice(start, start + perPage);
+
+  const rows = [];
+  for (let i = 0; i < slice.length; i += 3) {
+    rows.push(slice.slice(i, i + 3).map(([code, cfg]) => ({
+      text: `${cfg.flag} ${code}`, callback_data: `currency_${code}`
+    })));
+  }
+
+  const nav = [];
+  if (page > 0) nav.push({ text: '◀ Back', callback_data: 'currency_back' });
+  if (start + perPage < allCurrencies.length) nav.push({ text: 'More ▶', callback_data: 'currency_more' });
+  if (nav.length > 0) rows.push(nav);
+
+  send(chatId,
+    `${progressBar(4, ONBOARD_TOTAL)}\n\n` +
+    `💰 *Invoice Currency*\n\nSelect the currency you invoice in:`,
+    { reply_markup: { inline_keyboard: rows } }
+  );
 }
 
 async function handleOnboarding(chatId, userId, text) {
@@ -415,301 +306,333 @@ async function handleOnboarding(chatId, userId, text) {
   const input = (text || '').toLowerCase().trim();
   const p     = companyProfiles[userId];
 
-  // ── disclaimer ──────────────────────────────────────────────────────────────
-  if (state.step === 'disclaimer') {
-    if (input !== 'agree') return;  // only explicit /agree or callback proceeds
-    onboardingState[userId].step = 'company_name';
-    bot.sendMessage(chatId,
-      `${progressBar(1, ONBOARD_TOTAL)}\n\n` +
-      `🏢 *Company Name*\n\nWhat's your business or company name?`,
-      { parse_mode: 'Markdown' }
-    );
+  switch (state.step) {
 
-  // ── company_name ────────────────────────────────────────────────────────────
-  } else if (state.step === 'company_name') {
-    if (!text || text.trim().length < 1) {
-      bot.sendMessage(chatId, '⚠️ Please enter a valid company name.');
-      return;
+    case 'disclaimer':
+      if (input !== 'agree') return;
+      state.step = 'company_name';
+      send(chatId,
+        `${progressBar(1, ONBOARD_TOTAL)}\n\n` +
+        `🏢 *Step 1 — Company Name*\n\nWhat is your business or trading name?`
+      );
+      break;
+
+    case 'company_name':
+      if (!text?.trim()) return send(chatId, '⚠️ Please enter a valid company name.');
+      p.company_name = sanitizeInput(text);
+      state.step = 'company_address';
+      send(chatId,
+        `${progressBar(2, ONBOARD_TOTAL)}\n\n` +
+        `📍 *Step 2 — Business Address*\n\nEnter your full business address:`,
+        { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip', callback_data: 'setup_skip' }]] }}
+      );
+      break;
+
+    case 'company_address':
+      p.company_address = input === 'skip' ? '' : sanitizeInput(text);
+      state.step = 'trn';
+      send(chatId,
+        `${progressBar(3, ONBOARD_TOTAL)}\n\n` +
+        `🔐 *Step 3 — Tax Registration Number*\n\nEnter your TRN / VAT / GST registration number (optional):`,
+        { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip — No TRN', callback_data: 'setup_skip' }]] }}
+      );
+      break;
+
+    case 'trn':
+      p.trn = input === 'skip' ? '' : sanitizeInput(text);
+      state.step = 'currency';
+      showCurrencyPage(chatId, userId, 0);
+      break;
+
+    case 'currency': {
+      const curr = (text || '').toUpperCase().trim();
+      if (!CURRENCIES[curr]) return send(chatId, '⚠️ Please select a currency using the buttons above.');
+      p.currency = curr;
+      state.step = 'bank_name';
+      send(chatId,
+        `${progressBar(5, ONBOARD_TOTAL)}\n\n` +
+        `🏦 *Step 5 — Bank Name*\n\nEnter your bank name:\n_e.g. Emirates NBD, HDFC, Barclays, Chase_`
+      );
+      break;
     }
-    p.company_name = sanitizeInput(text);
-    onboardingState[userId].step = 'company_address';
-    bot.sendMessage(chatId,
-      `${progressBar(2, ONBOARD_TOTAL)}\n\n` +
-      `📍 *Business Address*\n\nEnter your full business address:`,
-      { parse_mode: 'Markdown' }
-    );
 
-  // ── company_address ─────────────────────────────────────────────────────────
-  } else if (state.step === 'company_address') {
-    p.company_address = sanitizeInput(text);
-    onboardingState[userId].step = 'trn';
-    bot.sendMessage(chatId,
-      `${progressBar(3, ONBOARD_TOTAL)}\n\n` +
-      `🔐 *Tax Registration Number (TRN)*\n\nEnter your TRN/VAT/GST registration number, or skip if you don't have one.`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '⏭ Skip', callback_data: 'setup_skip' }]] }
-      }
-    );
+    case 'bank_name':
+      p.bank_name = sanitizeInput(text);
+      state.step = 'iban';
+      send(chatId,
+        `${progressBar(6, ONBOARD_TOTAL)}\n\n` +
+        `🔑 *Step 6 — ${p.currency === 'INR' ? 'Account Number & IFSC' : 'IBAN'}*\n\n` +
+        `Enter your ${p.currency === 'INR' ? 'account number and IFSC code' : 'IBAN'}:`
+      );
+      break;
 
-  // ── trn ─────────────────────────────────────────────────────────────────────
-  } else if (state.step === 'trn') {
-    p.trn = input === 'skip' ? '' : sanitizeInput(text);
-    onboardingState[userId].step = 'currency';
-    bot.sendMessage(chatId,
-      `${progressBar(4, ONBOARD_TOTAL)}\n\n` +
-      `💰 *Invoice Currency*\n\nSelect the currency you invoice in:`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [
-          [
-            { text: '🇦🇪 AED', callback_data: 'currency_AED' },
-            { text: '🇺🇸 USD', callback_data: 'currency_USD' },
-            { text: '🇪🇺 EUR', callback_data: 'currency_EUR' },
-          ],
-          [
-            { text: '🇮🇳 INR', callback_data: 'currency_INR' },
-            { text: '🇸🇦 SAR', callback_data: 'currency_SAR' },
-            { text: '🇬🇧 GBP', callback_data: 'currency_GBP' },
-          ]
-        ]}
-      }
-    );
+    case 'iban':
+      p.iban = sanitizeInput(text);
+      state.step = 'account_name';
+      send(chatId,
+        `${progressBar(7, ONBOARD_TOTAL)}\n\n` +
+        `👤 *Step 7 — Account Holder Name*\n\nName on the bank account:`
+      );
+      break;
 
-  // ── currency ─────────────────────────────────────────────────────────────────
-  } else if (state.step === 'currency') {
-    const curr = input.toUpperCase();
-    if (!CURRENCIES[curr]) {
-      bot.sendMessage(chatId, '⚠️ Please select a currency using the buttons above.');
-      return;
-    }
-    p.currency = curr;
-    onboardingState[userId].step = 'bank_name';
-    bot.sendMessage(chatId,
-      `${progressBar(5, ONBOARD_TOTAL)}\n\n` +
-      `🏦 *Bank Name*\n\nEnter your bank name (e.g., Emirates NBD, HDFC, Chase, Lloyds):`,
-      { parse_mode: 'Markdown' }
-    );
-
-  // ── bank_name ────────────────────────────────────────────────────────────────
-  } else if (state.step === 'bank_name') {
-    p.bank_name = sanitizeInput(text);
-    onboardingState[userId].step = 'iban';
-    const label = p.currency === 'INR' ? 'Account Number & IFSC (e.g., 123456789 / HDFC0001234)' : 'IBAN';
-    bot.sendMessage(chatId,
-      `${progressBar(6, ONBOARD_TOTAL)}\n\n` +
-      `🔑 *${p.currency === 'INR' ? 'Account Number & IFSC' : 'IBAN'}*\n\nEnter your ${label}:`,
-      { parse_mode: 'Markdown' }
-    );
-
-  // ── iban ─────────────────────────────────────────────────────────────────────
-  } else if (state.step === 'iban') {
-    p.iban = sanitizeInput(text);
-    onboardingState[userId].step = 'account_name';
-    bot.sendMessage(chatId,
-      `${progressBar(7, ONBOARD_TOTAL)}\n\n` +
-      `👤 *Account Holder Name*\n\nEnter the name on the bank account:`,
-      { parse_mode: 'Markdown' }
-    );
-
-  // ── account_name ─────────────────────────────────────────────────────────────
-  } else if (state.step === 'account_name') {
-    p.account_name = sanitizeInput(text);
-    onboardingState[userId].step = 'tax_enabled';
-    const taxType = CURRENCIES[p.currency]?.tax || 'VAT';
-    bot.sendMessage(chatId,
-      `${progressBar(8, ONBOARD_TOTAL)}\n\n` +
-      `📊 *Tax Settings*\n\nDo you charge *${taxType}* on your invoices?`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[
+    case 'account_name':
+      p.account_name = sanitizeInput(text);
+      state.step = 'tax_enabled';
+      const taxType = CURRENCIES[p.currency]?.tax || 'VAT';
+      send(chatId,
+        `${progressBar(8, ONBOARD_TOTAL)}\n\n` +
+        `📊 *Step 8 — Tax Settings*\n\nDo you charge *${taxType}* on your invoices?`,
+        { reply_markup: { inline_keyboard: [[
           { text: `✅ Yes, I charge ${taxType}`, callback_data: 'tax_yes' },
           { text: '❌ No tax',                   callback_data: 'tax_no'  }
-        ]]}
-      }
-    );
-
-  // ── tax_enabled ──────────────────────────────────────────────────────────────
-  } else if (state.step === 'tax_enabled') {
-    const taxField = p.currency === 'INR' ? 'gst' : 'vat';
-    if (input === 'yes') {
-      p[`${taxField}_enabled`] = true;
-      if (taxField === 'gst') { p.vat_enabled = false; p.vat_rate = 0; }
-      else                    { p.gst_enabled = false; p.gst_rate = 0; }
-      onboardingState[userId].step = 'tax_rate';
-      bot.sendMessage(chatId,
-        `${progressBar(9, ONBOARD_TOTAL)}\n\n` +
-        `📈 *${taxField.toUpperCase()} Rate*\n\nEnter the ${taxField.toUpperCase()} percentage (e.g., \`5\` for 5%):`,
-        { parse_mode: 'Markdown' }
+        ]]}}
       );
-    } else if (input === 'no') {
-      p.vat_enabled = false; p.vat_rate = 0;
-      p.gst_enabled = false; p.gst_rate = 0;
-      onboardingState[userId].step = 'logo';
-      await sendLogoPrompt(chatId);
-    } else {
-      bot.sendMessage(chatId, '⚠️ Please tap ✅ Yes or ❌ No using the buttons above.');
+      break;
+
+    case 'tax_enabled': {
+      const taxField = ['INR','SGD','AUD'].includes(p.currency) ? 'gst' : 'vat';
+      if (input === 'yes') {
+        p[`${taxField}_enabled`] = true;
+        if (taxField === 'gst') { p.vat_enabled = false; p.vat_rate = 0; }
+        else                    { p.gst_enabled = false; p.gst_rate = 0; }
+        state.step = 'tax_rate';
+        send(chatId,
+          `${progressBar(9, ONBOARD_TOTAL)}\n\n` +
+          `📈 *Step 9 — ${taxField.toUpperCase()} Rate*\n\nEnter the percentage (e.g. \`5\` for 5%):`,
+        );
+      } else if (input === 'no') {
+        p.vat_enabled = false; p.vat_rate = 0;
+        p.gst_enabled = false; p.gst_rate = 0;
+        state.step = 'logo';
+        sendLogoPrompt(chatId);
+      } else {
+        send(chatId, '⚠️ Please tap Yes or No using the buttons above.');
+      }
+      break;
     }
 
-  // ── tax_rate ─────────────────────────────────────────────────────────────────
-  } else if (state.step === 'tax_rate') {
-    const rate = parseFloat(text);
-    if (isNaN(rate) || rate < 0 || rate > 100) {
-      bot.sendMessage(chatId, '⚠️ Please enter a valid percentage between 0 and 100 (e.g., 5).');
-      return;
+    case 'tax_rate': {
+      const rate = parseFloat(text);
+      if (isNaN(rate) || rate < 0 || rate > 100) return send(chatId, '⚠️ Enter a number between 0 and 100 (e.g., 5).');
+      const taxField = ['INR','SGD','AUD'].includes(p.currency) ? 'gst' : 'vat';
+      p[`${taxField}_rate`] = rate;
+      state.step = 'logo';
+      sendLogoPrompt(chatId);
+      break;
     }
-    const taxField = p.currency === 'INR' ? 'gst' : 'vat';
-    p[`${taxField}_rate`] = rate;
-    onboardingState[userId].step = 'logo';
-    await sendLogoPrompt(chatId);
 
-  // ── logo ──────────────────────────────────────────────────────────────────────
-  } else if (state.step === 'logo') {
-    if (input === 'skip') {
-      p.logo_path = null;
-      delete onboardingState[userId];
-      saveData();
-      await sendSetupComplete(chatId, userId);
-    }
+    case 'logo':
+      if (input === 'skip') {
+        p.logo_path = null;
+        delete onboardingState[userId];
+        saveData();
+        await sendSetupComplete(chatId, userId);
+      }
+      break;
   }
 }
 
-async function sendLogoPrompt(chatId) {
-  await bot.sendMessage(chatId,
+function sendLogoPrompt(chatId) {
+  send(chatId,
     `${progressBar(10, ONBOARD_TOTAL)}\n\n` +
-    `🖼 *Company Logo (Optional)*\n\nSend your logo image (PNG or JPG), or skip to use text only.`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: '⏭ Skip Logo', callback_data: 'setup_skip' }]] }
-    }
+    `🖼 *Step 10 — Company Logo (Optional)*\n\nSend your logo as a PNG or JPG, or skip to use text header.`,
+    { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip Logo', callback_data: 'setup_skip' }]] }}
   );
 }
 
 async function sendSetupComplete(chatId, userId) {
-  const p = companyProfiles[userId];
-  const tc = getTaxConfig(p);
+  const p    = companyProfiles[userId];
+  const tc   = getTaxConfig(p);
   const curr = CURRENCIES[p.currency] || {};
 
-  await bot.sendMessage(chatId,
-    `🎉 *Setup Complete!*\n\n` +
-    `Here's your business profile:\n\n` +
-    `🏢 *${p.company_name}*\n` +
-    `📍 ${p.company_address}\n` +
-    `${curr.flag || ''} ${p.currency} (${curr.name || ''})\n` +
-    `📊 ${tc.type}: ${tc.enabled ? `${tc.rate}%` : 'Not charged'}\n` +
-    `🏦 ${p.bank_name || 'No bank set'}\n` +
-    `🖼 Logo: ${p.logo_path ? '✅' : '❌'}\n\n` +
-    `You're all set! Just type or send a voice message to create your first invoice.\n\n` +
-    `_Example: "Web design for Acme Corp for 3000"_`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '📖 How to Create Invoices', callback_data: 'cmd_help' }
-      ]]}
-    }
+  await send(chatId,
+    `🎉 *Setup Complete!*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*${p.company_name}* is ready to invoice!\n\n` +
+    `🏢 ${p.company_name}\n` +
+    `📍 ${p.company_address || '_No address set_'}\n` +
+    `${curr.flag || ''} ${p.currency} — ${curr.name || ''}\n` +
+    `📊 ${tc.type}: ${tc.enabled ? `*${tc.rate}%*` : 'Not charged'}\n` +
+    `🏦 ${p.bank_name || '_No bank set_'}\n` +
+    `🖼 Logo: ${p.logo_path ? '✅ Uploaded' : '⬜ Text header'}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*You\'re all set!* 🚀\n\n` +
+    `Create your first invoice now — just type:\n` +
+    `_"Web design for Acme Corp for 3000"_\n\n` +
+    `Or send a 🎤 voice message!`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '🏠 Go to Dashboard', callback_data: 'nav_home' }],
+      [{ text: '📖 How to Create Invoices', callback_data: 'cmd_help' }]
+    ]}}
   );
 }
 
-// ─── Profile Display ──────────────────────────────────────────────────────────
+// ─── Profile ──────────────────────────────────────────────────────────────────
 function showProfile(chatId, userId) {
   const p = companyProfiles[userId];
-  if (!p) {
-    bot.sendMessage(chatId, '👤 No profile found.\n\nUse /setup to create your business profile.', {
-      reply_markup: { inline_keyboard: [[{ text: '🚀 Set Up Now', callback_data: 'cmd_setup' }]] }
-    });
-    return;
-  }
+  if (!p) return send(chatId,
+    `👤 *No Profile Found*\n\nUse /setup to create your business profile.`,
+    { reply_markup: { inline_keyboard: [[{ text: '🚀 Set Up Now', callback_data: 'cmd_setup' }]] }});
 
-  const curr = CURRENCIES[p.currency] || {};
-  const tc   = getTaxConfig(p);
-  const invs = invoiceHistory[userId] || [];
+  const curr  = CURRENCIES[p.currency] || {};
+  const tc    = getTaxConfig(p);
+  const invs  = invoiceHistory[userId] || [];
+  const stats = calculateStats(invs, p.currency);
 
-  bot.sendMessage(chatId,
-    `👤 *Business Profile*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+  // Paid collection rate
+  const paidPct = stats.total > 0 ? Math.round((stats.paid / stats.total) * 100) : 0;
+  const collBar = asciiBar(stats.paid, stats.total || 1, 10);
+
+  send(chatId,
+    `👤 *Business Profile*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `🏢 *${p.company_name}*\n` +
-    `📍 ${p.company_address}\n` +
-    `${p.trn ? `🔐 TRN: \`${p.trn}\`` : '🔐 TRN: _Not set_'}\n\n` +
-    `💰 *Invoice Settings*\n` +
-    `${curr.flag || ''} Currency: *${p.currency}* — ${curr.name || ''}\n` +
-    `📊 ${tc.type}: ${tc.enabled ? `✅ ${tc.rate}%` : '❌ Not charged'}\n\n` +
+    `📍 ${p.company_address || '_Not set_'}\n` +
+    `${p.trn ? `🔐 TRN: \`${p.trn}\`` : '🔐 _No TRN / VAT number_'}\n\n` +
+    `💰 *Invoice Currency*\n` +
+    `${curr.flag || '🌍'} *${p.currency}* — ${curr.name || ''}\n` +
+    `📊 ${tc.type}: ${tc.enabled ? `✅ *${tc.rate}%*` : '❌ Not charged'}\n\n` +
     `🏦 *Bank Details*\n` +
     `🏛 ${p.bank_name    || '_Not set_'}\n` +
     `🔑 ${p.iban         || '_Not set_'}\n` +
-    `👤 ${p.account_name || '_Not set_'}\n\n` +
-    `🖼 Logo: ${p.logo_path ? '✅ Uploaded' : '❌ Not set'}\n` +
-    `📄 Total Invoices: *${invs.length}*`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '✏️ Update Profile', callback_data: 'cmd_setup'     },
-        { text: '📋 View Invoices',  callback_data: 'nav_invoices'  }
-      ]]}
-    }
+    `👤 ${p.account_name || '_Not set_'}\n` +
+    `🖼 Logo: ${p.logo_path ? '✅ Uploaded' : '⬜ Text header'}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📈 *Lifetime Performance*\n` +
+    `📄 ${stats.count} invoices  ·  ${formatAmount(stats.total, p.currency)}\n` +
+    `✅ Paid: ${formatAmount(stats.paid, p.currency)}\n` +
+    `⏳ Outstanding: ${formatAmount(stats.unpaid, p.currency)}\n` +
+    `${collBar} ${paidPct}% collected`,
+    { reply_markup: { inline_keyboard: [
+      [
+        { text: '✏️ Update Profile', callback_data: 'cmd_setup'    },
+        { text: '📊 My Stats',       callback_data: 'nav_stats'    },
+      ],
+      [{ text: '🏠 Home', callback_data: 'nav_home' }]
+    ]}}
   );
 }
 
 // ─── Invoice History ──────────────────────────────────────────────────────────
-async function showInvoiceHistory(chatId, userId) {
+async function showInvoices(chatId, userId) {
   const invs = invoiceHistory[userId] || [];
   if (invs.length === 0) {
-    await bot.sendMessage(chatId,
-      '📋 *No invoices yet*\n\nCreate your first invoice by typing:\n_"Consulting for John Smith for 1500"_',
-      { parse_mode: 'Markdown' }
+    return send(chatId,
+      `📋 *No Invoices Yet*\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `Create your first invoice now!\n\n` +
+      `Just type:\n_"Consulting for John Smith for 1500"_\n\n` +
+      `Or send a 🎤 voice message`
     );
-    return;
   }
 
-  const recent   = invs.slice(-8).reverse();
   const currency = companyProfiles[userId]?.currency || 'AED';
+  const recent   = invs.slice(-10).reverse();
+  const unpaidCt = invs.filter(i => i.status !== 'paid').length;
 
-  let msg = `📋 *Invoices* (${invs.length} total)\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = `📋 *Recent Invoices*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  if (unpaidCt > 0) msg += `⏳ *${unpaidCt} unpaid* invoice${unpaidCt !== 1 ? 's' : ''}\n\n`;
 
   recent.forEach((inv, i) => {
     const customer = inv.customer_name?.trim() || 'Unknown';
     const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
-    const dot      = i === 0 ? '🔵' : '⚪';
-    msg += `${dot} \`${inv.invoice_id}\`\n`;
-    msg += `   👤 ${customer}  💰 ${amount}\n`;
-    msg += `   📅 ${inv.date}\n\n`;
+    const status   = inv.status === 'paid' ? '✅' : '⏳';
+    const recency  = i === 0 ? ' ← *latest*' : '';
+    msg += `${status} \`${inv.invoice_id}\`${recency}\n`;
+    msg += `👤 ${customer}  💰 *${amount}*\n`;
+    msg += `📅 ${inv.date}\n\n`;
   });
 
-  await bot.sendMessage(chatId, msg, {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: [[
-      { text: '📥 Download',  callback_data: 'nav_download' },
-      { text: '📊 Stats',     callback_data: 'nav_stats'    }
-    ]]}
-  });
+  if (invs.length > 10) msg += `_+${invs.length - 10} older invoices in download_\n`;
+
+  // Mark-paid buttons for most recent unpaid
+  const unpaid = recent.filter(i => i.status !== 'paid').slice(0, 2);
+  const keyboard = [];
+  if (unpaid.length > 0) {
+    keyboard.push(unpaid.map(inv => ({
+      text: `✅ Mark Paid — ${inv.invoice_id}`,
+      callback_data: `paid_${inv.invoice_id}`
+    })));
+  }
+  keyboard.push([
+    { text: '📥 Download All',  callback_data: 'nav_download' },
+    { text: '📊 Stats',         callback_data: 'nav_stats'    }
+  ]);
+  keyboard.push([{ text: '🏠 Home', callback_data: 'nav_home' }]);
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: keyboard } });
 }
 
-// ─── Customer List ────────────────────────────────────────────────────────────
+// ─── Mark Invoice Paid ────────────────────────────────────────────────────────
+function handleMarkPaid(chatId, userId, invoiceId) {
+  const result = markInvoicePaid(userId, invoiceId);
+  if (result) {
+    // Find the invoice for amount
+    const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
+    const amtStr = inv ? ` · ${formatAmount(inv.total, inv.currency)}` : '';
+    send(chatId,
+      `✅ *Payment Received!*\n\n` +
+      `\`${invoiceId}\`${amtStr}\n\n` +
+      `💰 Cash in the bank! Great work. 🎉`,
+      { reply_markup: { inline_keyboard: [[
+        { text: '📊 View Stats',    callback_data: 'nav_stats'    },
+        { text: '📋 All Invoices',  callback_data: 'nav_invoices' }
+      ]]}}
+    );
+  } else {
+    send(chatId, `⚠️ Invoice \`${invoiceId}\` not found.`);
+  }
+}
+
+// ─── Customers ────────────────────────────────────────────────────────────────
 function showCustomers(chatId, userId) {
   const invs = invoiceHistory[userId] || [];
-  if (invs.length === 0) {
-    bot.sendMessage(chatId, '👥 No customers yet.\n\nCreate an invoice to add your first customer!');
-    return;
-  }
+  if (invs.length === 0) return send(chatId,
+    `👥 *No Customers Yet*\n\nCreate your first invoice to build your client directory!\n\n_"Consulting for John Smith for 1500"_`);
 
   const customers = {};
   invs.forEach(inv => {
     const name = inv.customer_name?.trim();
     if (!name) return;
-    if (!customers[name]) customers[name] = { count: 0, total: 0, currency: inv.currency, last: inv.date };
+    if (!customers[name]) customers[name] = { count: 0, total: 0, paid: 0, currency: inv.currency, last: inv.date };
     customers[name].count++;
     customers[name].total += parseFloat(inv.total) || 0;
-    customers[name].last   = inv.date;
+    if (inv.status === 'paid') customers[name].paid += parseFloat(inv.total) || 0;
+    customers[name].last = inv.date;
   });
 
-  const sorted = Object.entries(customers).sort((a, b) => b[1].total - a[1].total);
+  const sorted     = Object.entries(customers).sort((a, b) => b[1].total - a[1].total);
+  const maxRevenue = sorted[0]?.[1].total || 1;
+  const currency   = companyProfiles[userId]?.currency || 'AED';
 
-  let msg = `👥 *Customers* (${sorted.length} total)\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-  sorted.slice(0, 12).forEach(([name, d], i) => {
-    msg += `${i + 1}. *${name}*\n`;
-    msg += `   📄 ${d.count} invoice${d.count !== 1 ? 's' : ''}  💰 ${formatAmount(d.total, d.currency)}\n`;
-    msg += `   📅 Last: ${d.last}\n\n`;
+  let msg = `👥 *Client Directory*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  msg += `${sorted.length} client${sorted.length !== 1 ? 's' : ''} · `;
+  const totalRevenue = sorted.reduce((s, [,d]) => s + d.total, 0);
+  msg += `${formatAmount(totalRevenue, currency)} lifetime\n\n`;
+
+  const medals = ['🥇', '🥈', '🥉'];
+  sorted.slice(0, 10).forEach(([name, d], i) => {
+    const bar     = asciiBar(d.total, maxRevenue, 10);
+    const badge   = i < 3 ? medals[i] : `${i + 1}.`;
+    const paidPct = d.total > 0 ? Math.round((d.paid / d.total) * 100) : 0;
+    msg += `${badge} *${name}*\n`;
+    msg += `   ${bar}  ${formatAmount(d.total, d.currency)}\n`;
+    msg += `   📄 ${d.count} invoice${d.count !== 1 ? 's' : ''}`;
+    if (d.paid > 0) msg += `  ·  ✅ ${paidPct}% paid`;
+    msg += `  ·  Last: ${d.last}\n\n`;
   });
 
-  bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+  if (sorted.length > 10) msg += `_+${sorted.length - 10} more clients in download_\n`;
+
+  send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '📊 Revenue Stats', callback_data: 'nav_stats'    },
+      { text: '📥 Export CSV',    callback_data: 'nav_download' },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
 }
 
 // ─── Period Selector ──────────────────────────────────────────────────────────
@@ -717,676 +640,1026 @@ async function showPeriodSelector(chatId, userId, type) {
   commandState[userId] = { type };
   const prefix = type === 'stats' ? 'stats_' : 'dl_';
   const icon   = type === 'stats' ? '📊' : '📥';
-  const title  = type === 'stats' ? 'View Statistics' : 'Download Invoices';
 
-  await bot.sendMessage(chatId, `${icon} *${title}*\n\nSelect a time period:`, {
-    parse_mode: 'Markdown',
+  await send(chatId, `${icon} *${type === 'stats' ? 'Revenue Statistics' : 'Download Invoices'}*\n\nSelect a time period:`, {
     reply_markup: { inline_keyboard: [
       [
-        { text: '📅 This Month',    callback_data: `${prefix}this_month`    },
-        { text: '📅 Last Month',    callback_data: `${prefix}last_month`    }
+        { text: '📅 This Month',   callback_data: `${prefix}this_month`   },
+        { text: '📅 Last Month',   callback_data: `${prefix}last_month`   }
       ],
       [
-        { text: '📅 This Quarter',  callback_data: `${prefix}this_quarter`  },
-        { text: '📅 This Year',     callback_data: `${prefix}this_year`     }
+        { text: '📅 This Quarter', callback_data: `${prefix}this_quarter` },
+        { text: '📅 This Year',    callback_data: `${prefix}this_year`    }
       ],
-      [
-        { text: '📅 All Time',      callback_data: `${prefix}all`           }
-      ]
+      [{ text: '📅 All Time',      callback_data: `${prefix}all`          }]
     ]}
   });
 }
 
-// ─── Filter Invoices ──────────────────────────────────────────────────────────
-function filterInvoicesByPeriod(invoices, period) {
-  const now = new Date();
-  return invoices.filter(inv => {
-    const parts = inv.date?.split('/');
-    if (!parts || parts.length < 3) return false;
-    const invDate = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
-    if (isNaN(invDate)) return false;
-
-    if (period === 'this_month') {
-      return invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear();
-    }
-    if (period === 'last_month') {
-      const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      return invDate.getMonth() === last.getMonth() && invDate.getFullYear() === last.getFullYear();
-    }
-    if (period === 'this_quarter') {
-      const q = Math.floor(now.getMonth() / 3);
-      return Math.floor(invDate.getMonth() / 3) === q && invDate.getFullYear() === now.getFullYear();
-    }
-    if (period === 'this_year') {
-      return invDate.getFullYear() === now.getFullYear();
-    }
-    return true; // 'all'
-  });
-}
-
 // ─── Stats ────────────────────────────────────────────────────────────────────
-const PERIOD_NAMES = {
-  this_month: 'This Month', last_month: 'Last Month',
-  this_quarter: 'This Quarter', this_year: 'This Year', all: 'All Time'
-};
-
 async function showStats(chatId, userId, period) {
   const invs = invoiceHistory[userId] || [];
-  if (invs.length === 0) {
-    await bot.sendMessage(chatId, '📊 No invoices yet.\n\nCreate your first invoice to start tracking revenue!');
-    return;
-  }
+  if (invs.length === 0) return send(chatId,
+    `📊 *No Invoices Yet*\n\nCreate your first invoice to start tracking revenue!\n\n_"Consulting for Client for 1500"_`);
 
   const filtered = filterInvoicesByPeriod(invs, period);
-  if (filtered.length === 0) {
-    await bot.sendMessage(chatId,
-      `📊 No invoices found for *${PERIOD_NAMES[period] || period}*.`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
+  if (filtered.length === 0) return send(chatId,
+    `📊 No invoices found for *${PERIOD_NAMES[period] || period}*.\n\nTry a different period:`,
+    { reply_markup: { inline_keyboard: [[
+      { text: '📅 All Time', callback_data: 'stats_all' },
+      { text: '📅 This Year', callback_data: 'stats_this_year' }
+    ]]}}
+  );
 
   const currency = companyProfiles[userId]?.currency || 'AED';
-  let total = 0, taxTotal = 0;
-  filtered.forEach(inv => {
-    total    += parseFloat(inv.total)      || 0;
-    taxTotal += parseFloat(inv.tax_amount) || 0;
-  });
-  const subtotal = total - taxTotal;
-  const avg      = total / filtered.length;
+  const stats    = calculateStats(filtered, currency);
 
-  // Top 3 customers
-  const custTotals = {};
-  filtered.forEach(inv => {
-    const name = inv.customer_name?.trim();
-    if (name) custTotals[name] = (custTotals[name] || 0) + (parseFloat(inv.total) || 0);
-  });
-  const topCustomers = Object.entries(custTotals).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  // Paid collection progress bar
+  const paidPct  = stats.total > 0 ? Math.round((stats.paid / stats.total) * 100) : 0;
+  const paidBar  = asciiBar(stats.paid, stats.total || 1, 12);
 
-  let msg = `📊 *Statistics — ${PERIOD_NAMES[period] || period}*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-  msg += `📄 Invoices: *${filtered.length}*\n`;
-  msg += `💰 Total Revenue: *${formatAmount(total, currency)}*\n`;
-  msg += `📋 Subtotal (ex. tax): ${formatAmount(subtotal, currency)}\n`;
-  if (taxTotal > 0) msg += `🏛 Tax Collected: ${formatAmount(taxTotal, currency)}\n`;
-  msg += `📈 Average Invoice: *${formatAmount(avg, currency)}*\n`;
+  // 6-month trend (last 6 months from all invoices for context)
+  const now = new Date();
+  const monthlyData = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const monthInvs = invs.filter(inv => {
+      const parts = inv.date?.split('/');
+      if (!parts || parts.length < 3) return false;
+      const id = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, 1);
+      return id.getMonth() === d.getMonth() && id.getFullYear() === d.getFullYear();
+    });
+    const total = monthInvs.reduce((s, inv) => s + (parseFloat(inv.total) || 0), 0);
+    monthlyData.push({ month: d.toLocaleString('en-US', { month: 'short' }), total });
+  }
+  const maxMonth = Math.max(...monthlyData.map(m => m.total), 1);
 
-  if (topCustomers.length > 0) {
-    const medals = ['🥇', '🥈', '🥉'];
-    msg += `\n🏆 *Top Customers*\n`;
-    topCustomers.forEach(([name, amt], i) => {
-      msg += `${medals[i]} ${name} — ${formatAmount(amt, currency)}\n`;
+  let msg = `📊 *${PERIOD_NAMES[period] || period} — Revenue Report*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  msg += `📄 *${stats.count}* invoice${stats.count !== 1 ? 's' : ''}\n`;
+  msg += `💰 *Revenue:*  ${formatAmount(stats.total, currency)}\n`;
+  if (stats.taxTotal > 0) {
+    msg += `📋 Subtotal:  ${formatAmount(stats.subtotal, currency)}\n`;
+    msg += `🏛 Tax:  ${formatAmount(stats.taxTotal, currency)}\n`;
+  }
+  msg += `📈 Average:  ${formatAmount(stats.avg, currency)}\n\n`;
+
+  msg += `*💳 Collection*\n`;
+  msg += `${paidBar} ${paidPct}%\n`;
+  msg += `✅ Collected:  ${formatAmount(stats.paid, currency)}\n`;
+  msg += `⏳ Outstanding:  ${formatAmount(stats.unpaid, currency)}\n`;
+
+  if (stats.topCustomers.length > 0) {
+    const maxCust = stats.topCustomers[0][1];
+    const medals  = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+    msg += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `🏆 *Top Customers*\n\n`;
+    stats.topCustomers.forEach(([name, amt], i) => {
+      const bar = asciiBar(amt, maxCust, 10);
+      msg += `${medals[i]} *${name}*\n`;
+      msg += `   ${bar}  ${formatAmount(amt, currency)}\n\n`;
     });
   }
 
-  await bot.sendMessage(chatId, msg, {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: [[
-      { text: '📥 Download These Invoices', callback_data: `dl_${period}` }
-    ]]}
-  });
-}
-
-// ─── Download / ZIP ───────────────────────────────────────────────────────────
-function generateCSV(invoices) {
-  const esc = (v) => {
-    if (v === null || v === undefined) return '';
-    const s = String(v).replace(/"/g, '""');
-    return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s}"` : s;
-  };
-  let csv = 'Invoice ID,Date,Customer Name,Service,Subtotal,Tax Amount,Total,Currency,Payment Link\n';
-  invoices.forEach(inv => {
-    const sub = ((parseFloat(inv.total) || 0) - (parseFloat(inv.tax_amount) || 0)).toFixed(2);
-    csv += [
-      esc(inv.invoice_id), esc(inv.date), esc(inv.customer_name), esc(inv.service),
-      esc(sub), esc(inv.tax_amount || '0.00'), esc(inv.total), esc(inv.currency),
-      esc(inv.payment_link || '')
-    ].join(',') + '\n';
-  });
-  return csv;
-}
-
-async function downloadInvoicesByPeriod(chatId, userId, period) {
-  const invs     = invoiceHistory[userId] || [];
-  const filtered = filterInvoicesByPeriod(invs, period);
-
-  if (filtered.length === 0) {
-    await bot.sendMessage(chatId,
-      `📥 No invoices found for *${PERIOD_NAMES[period] || period}*.`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
+  // 6-month chart (always show for visual appeal)
+  if (monthlyData.some(m => m.total > 0)) {
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `📅 *Last 6 Months*\n\n`;
+    monthlyData.forEach(({ month, total }) => {
+      const bar = asciiBar(total, maxMonth, 10);
+      const amt = total > 0 ? `  ${formatAmount(total, currency)}` : '  —';
+      msg += `\`${month}\` ${bar}${amt}\n`;
+    });
   }
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '🤖 AI Insights',       callback_data: `insights_${period}` },
+      { text: '⏱ Aging Report',       callback_data: 'nav_aging'          },
+    ],
+    [
+      { text: '📥 Download Invoices', callback_data: `dl_${period}`       },
+      { text: '👥 Customers',         callback_data: 'nav_customers'      },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
+}
+
+// ─── Download ─────────────────────────────────────────────────────────────────
+async function downloadInvoices(chatId, userId, period) {
+  const invs = invoiceHistory[userId] || [];
+  const filtered = filterInvoicesByPeriod(invs, period);
+  if (filtered.length === 0) return send(chatId, `📥 No invoices for *${PERIOD_NAMES[period] || period}*.`);
+
+  await send(chatId, `⏳ Preparing *${filtered.length}* invoice${filtered.length !== 1 ? 's' : ''}...`);
 
   try {
-    await bot.sendMessage(chatId,
-      `⏳ Preparing *${filtered.length}* invoice${filtered.length !== 1 ? 's' : ''} — *${PERIOD_NAMES[period] || period}*...`,
-      { parse_mode: 'Markdown' }
-    );
+    const result   = await buildDownloadZip(userId, period);
+    if (!result) return send(chatId, '⚠️ Error building download. Please try again.');
 
-    const ts      = Date.now();
-    const zipPath = `/tmp/invoices_${userId}_${ts}.zip`;
-    const csvPath = `/tmp/invoices_${userId}_${ts}.csv`;
-    const currency = companyProfiles[userId]?.currency || 'AED';
+    const { zipPath, stats, currency } = result;
+    const caption =
+      `📦 *${PERIOD_NAMES[period]}*\n` +
+      `📄 ${stats.count} invoice${stats.count !== 1 ? 's' : ''}\n` +
+      `💰 ${formatAmount(stats.total, currency)}\n` +
+      `✅ Paid: ${formatAmount(stats.paid, currency)}`;
 
-    fs.writeFileSync(csvPath, generateCSV(filtered));
-
-    await new Promise((resolve, reject) => {
-      const output  = fs.createWriteStream(zipPath);
-      const archive = archiver('zip', { zlib: { level: 9 } });
-      output.on('close', resolve);
-      archive.on('error', reject);
-      archive.pipe(output);
-      archive.file(csvPath, { name: 'summary.csv' });
-      filtered.forEach(inv => {
-        if (inv.file_path && fs.existsSync(inv.file_path)) {
-          archive.file(inv.file_path, { name: path.basename(inv.file_path) });
-        }
-      });
-      archive.finalize();
-    });
-
-    const total = filtered.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
-
-    await bot.sendDocument(chatId, zipPath, {
-      caption:    `📦 *${PERIOD_NAMES[period]}* — ${filtered.length} invoice${filtered.length !== 1 ? 's' : ''}\n💰 Total: ${formatAmount(total, currency)}`,
-      parse_mode: 'Markdown'
-    });
-
-    fs.unlinkSync(zipPath);
-    fs.unlinkSync(csvPath);
-
+    await bot.sendDocument(chatId, zipPath, { caption, parse_mode: 'Markdown' });
+    try { fs.unlinkSync(zipPath); } catch (_) {}
   } catch (err) {
-    console.error('Download error:', err);
-    await bot.sendMessage(chatId, '⚠️ Error creating download. Please try again.');
+    console.error('Download error:', err.message);
+    send(chatId, '⚠️ Error creating download. Please try again.');
   }
 }
 
-// ─── Delete Data Confirmation ─────────────────────────────────────────────────
+// ─── Delete Data ──────────────────────────────────────────────────────────────
 async function confirmDeleteData(chatId, userId) {
   const count = (invoiceHistory[userId] || []).length;
-  await bot.sendMessage(chatId,
-    `🗑 *Delete All Your Data*\n\n` +
-    `⚠️ This will permanently delete:\n` +
-    `• Your business profile\n` +
-    `• All *${count}* invoice record${count !== 1 ? 's' : ''}\n` +
-    `• All customer data and statistics\n\n` +
-    `This action *cannot be undone*.`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '🗑 Yes, Delete Everything', callback_data: 'deletedata_confirm' },
-        { text: '❌ Cancel',                  callback_data: 'deletedata_cancel'  }
-      ]]}
-    }
+  const invs  = invoiceHistory[userId] || [];
+  const stats = calculateStats(invs, companyProfiles[userId]?.currency || 'AED');
+  await send(chatId,
+    `🗑 *Delete All Data*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ *This will permanently erase:*\n\n` +
+    `• Business profile & settings\n` +
+    `• *${count}* invoice record${count !== 1 ? 's' : ''}\n` +
+    `• ${formatAmount(stats.total, companyProfiles[userId]?.currency || 'AED')} revenue history\n` +
+    `• All customer & statistics data\n\n` +
+    `*This action cannot be undone.*\n\n` +
+    `_Download your invoices first? Use /download_`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '🗑 Yes, Delete Everything', callback_data: 'deletedata_confirm' }],
+      [{ text: '❌ Cancel — Keep My Data',  callback_data: 'deletedata_cancel'  }],
+    ]}}
   );
 }
 
 // ─── Voice Message ────────────────────────────────────────────────────────────
 async function handleVoiceMessage(chatId, userId, voice, firstName) {
   try {
-    await bot.sendMessage(chatId, '🎤 Processing your voice message...');
+    await send(chatId, '🎤 _Listening... transcribing your voice note_');
 
     const file      = await bot.getFile(voice.file_id);
     const fileUrl   = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
     const res       = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    const voicePath = `/tmp/voice_${userId}_${Date.now()}.ogg`;
+    const voicePath = `/tmp/voice/${userId}_${Date.now()}.ogg`;
     fs.writeFileSync(voicePath, Buffer.from(res.data));
 
-    const transcription = await openai.audio.transcriptions.create({
-      file:  fs.createReadStream(voicePath),
-      model: 'whisper-1'
-    });
-    fs.unlinkSync(voicePath);
+    let transcribedText;
+    try {
+      transcribedText = await transcribeAudio(voicePath);
+    } finally {
+      try { fs.unlinkSync(voicePath); } catch (_) {}
+    }
 
-    const transcribedText = sanitizeInput(transcription.text);
-    await bot.sendMessage(chatId,
-      `🎤 *Heard:* _"${transcribedText}"_\n\n⚡ Processing...`,
-      { parse_mode: 'Markdown' }
+    transcribedText = sanitizeInput(transcribedText);
+    await send(chatId,
+      `🎤 *Heard you say:*\n_"${transcribedText}"_\n\n` +
+      `⚡ Extracting invoice details...`
     );
-
     await handleTextMessage(chatId, userId, transcribedText, firstName);
 
   } catch (err) {
-    console.error('Voice error:', err);
-    await bot.sendMessage(chatId,
-      '⚠️ Could not process your voice message. Please try again or type your invoice details.'
+    console.error('Voice error:', err.message);
+    send(chatId,
+      `⚠️ *Voice note couldn't be processed*\n\n` +
+      `Please type your invoice instead:\n` +
+      `_"Plumbing for Ahmed at Marina for 500"_`
     );
   }
 }
 
-// ─── Text Message Routing ─────────────────────────────────────────────────────
+// ─── Text Message Router ──────────────────────────────────────────────────────
 async function handleTextMessage(chatId, userId, text, firstName) {
   const lower = text.toLowerCase();
 
-  // Natural language download/stats commands
-  if (lower.includes('download') || lower.includes('export')) {
-    const period = lower.includes('this month') ? 'this_month'
-                 : lower.includes('last month') ? 'last_month'
-                 : lower.includes('quarter')    ? 'this_quarter'
-                 : lower.includes('year')       ? 'this_year'
-                 : null;
-    if (period) { await downloadInvoicesByPeriod(chatId, userId, period); return; }
-    await showPeriodSelector(chatId, userId, 'download');
-    return;
+  // Quick re-invoice: "bill [name] again" or "invoice [name] again"
+  const reInvoiceMatch = lower.match(/\b(bill|invoice)\s+(.+?)\s+again\b/i);
+  if (reInvoiceMatch && companyProfiles[userId]) {
+    const customerName = reInvoiceMatch[2].trim();
+    const lastInv      = getLastInvoiceForCustomer(userId, customerName);
+    if (lastInv) {
+      return handleQuickReInvoice(chatId, userId, customerName, lastInv);
+    } else {
+      return send(chatId, `❓ No previous invoice found for *${customerName}*.\n\nCreate a new one:\n_"${lastInv ? lastInv.service : 'Service description'} for ${customerName} for [amount]"_`);
+    }
   }
 
-  if (lower.includes('stat') || lower.includes('revenue') || lower.includes('earning')) {
-    const period = lower.includes('this month') ? 'this_month'
-                 : lower.includes('last month') ? 'last_month'
-                 : null;
-    if (period) { await showStats(chatId, userId, period); return; }
-    await showPeriodSelector(chatId, userId, 'stats');
-    return;
+  // Expense logging: "spent X on Y" or "expense: X for Y"
+  if (/\b(spent|expense[d]?|paid for|cost[s]?)\b/i.test(lower) && /\d+/.test(lower)) {
+    if (commandState[userId]?.type === 'expense_confirm') return; // handled elsewhere
+    return handleExpenseEntry(chatId, userId, text);
   }
+
+  // Natural language shortcuts
+  if (/\b(download|export)\b/i.test(lower)) {
+    const period = /this month/i.test(lower) ? 'this_month'
+                 : /last month/i.test(lower) ? 'last_month'
+                 : /quarter/i.test(lower)    ? 'this_quarter'
+                 : /year/i.test(lower)       ? 'this_year' : null;
+    if (period) return downloadInvoices(chatId, userId, period);
+    return showPeriodSelector(chatId, userId, 'download');
+  }
+  if (/\b(stat(s|istic)?s?|revenue|earn)/i.test(lower)) {
+    const period = /this month/i.test(lower) ? 'this_month'
+                 : /last month/i.test(lower) ? 'last_month' : null;
+    if (period) return showStats(chatId, userId, period);
+    return showPeriodSelector(chatId, userId, 'stats');
+  }
+  if (/\b(invoice|bill)s?\b/i.test(lower) && !/for.*\d/.test(lower)) return showInvoices(chatId, userId);
+  if (/\b(customer|client)s?\b/i.test(lower) && !/for.*\d/.test(lower)) return showCustomers(chatId, userId);
+  if (/\b(profile|settings?)\b/i.test(lower)) return showProfile(chatId, userId);
 
   // AI classification
   const intent = await classifyIntent(text);
 
   if (intent === 'invoice') {
-    await processInvoiceRequest(chatId, userId, sanitizeInput(text));
+    await handleInvoiceRequest(chatId, userId, sanitizeInput(text));
   } else if (intent === 'greeting' || intent === 'help') {
-    showWelcomeMessage(chatId, userId, firstName);
+    showWelcome(chatId, userId, firstName);
+  } else if (intent === 'stats') {
+    showPeriodSelector(chatId, userId, 'stats');
+  } else if (intent === 'download') {
+    showPeriodSelector(chatId, userId, 'download');
   } else {
-    await bot.sendMessage(chatId,
-      `❓ I didn't understand that.\n\n` +
+    send(chatId,
+      `❓ I\'m not sure what you mean.\n\n` +
       `To create an invoice, try:\n` +
-      `_"Plumbing for Ahmed at Marina for 500"_\n\n` +
-      `Or use /help for all available commands.`,
-      { parse_mode: 'Markdown' }
+      `_"Web design for Acme Corp for 3000"_\n\n` +
+      `Or use /help to see all commands.`
     );
   }
 }
 
-// ─── Handle Command State (text-based period selection fallback) ───────────────
 async function handleCommandState(chatId, userId, text) {
   const state = commandState[userId];
   if (!state) return;
+  const lower = text.toLowerCase().trim();
 
-  const lower  = text.toLowerCase();
-  const period = lower.includes('this month')  ? 'this_month'
-               : lower.includes('last month')  ? 'last_month'
-               : lower.includes('quarter')     ? 'this_quarter'
-               : lower.includes('year')        ? 'this_year'
-               : lower.includes('all')         ? 'all'
-               : null;
+  // ── Revenue goal input ───────────────────────────────────────────────────────
+  if (state.type === 'set_goal') {
+    const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
+    if (isNaN(amount) || amount <= 0) {
+      return send(chatId, '⚠️ Please enter a valid number, e.g. `10000`.');
+    }
+    delete commandState[userId];
+    setRevenueGoal(userId, amount);
+    const currency = companyProfiles[userId]?.currency || 'AED';
+    return send(chatId,
+      `🎯 *Goal Set!*\n\nMonthly target: *${formatAmount(amount, currency)}*\n\nYour goal will show as a progress bar on your home dashboard. Good luck! 💪`,
+      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
+    );
+  }
 
+  // ── Template customer name ──────────────────────────────────────────────────
+  if (state.type === 'template_customer') {
+    const customerName = sanitizeInput(text);
+    if (!customerName) return send(chatId, '⚠️ Please enter a valid customer name.');
+    delete commandState[userId];
+
+    const { template, subtotal, tax, total, tc } = state;
+    const profile = companyProfiles[userId];
+    const { pendingInvoices: pi } = require('./core');
+    pi[userId] = {
+      data: { customer_name: customerName, address: null, line_items: template.line_items },
+      profile, subtotal, tax, total, tc,
+    };
+
+    const curr = CURRENCIES[profile.currency] || {};
+    let preview = `📌 *From Template: ${template.name}*\n`;
+    preview += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    preview += `🏢 *From:*  ${profile.company_name}\n`;
+    preview += `👤 *Bill To:*  ${customerName}\n\n`;
+    template.line_items.forEach(li => {
+      preview += `│ ${li.description} — *${formatAmount(li.amount, profile.currency)}*\n`;
+    });
+    if (tc.enabled && tax > 0) preview += `\n${tc.type} ${tc.rate}%: ${formatAmount(tax, profile.currency)}\n`;
+    preview += `\n💰 *Total: ${formatAmount(total, profile.currency)}*\n\n`;
+    preview += `_Tap Generate to create the PDF._`;
+
+    return send(chatId, preview, { reply_markup: { inline_keyboard: [
+      [{ text: '✅ Generate Invoice PDF', callback_data: 'confirm_invoice' }],
+      [{ text: '❌ Cancel',               callback_data: 'nav_home'        }],
+    ]}});
+  }
+
+  // ── Template name input ─────────────────────────────────────────────────────
+  if (state.type === 'template_name') {
+    const templateName = sanitizeInput(text).slice(0, 40);
+    if (!templateName) return send(chatId, '⚠️ Please enter a valid template name.');
+    delete commandState[userId];
+
+    const lastInv = state.lastInv;
+    const profile = companyProfiles[userId];
+    const tc      = getTaxConfig(profile);
+
+    // Reconstruct line items from saved invoice
+    const subtotal = (parseFloat(lastInv.total) || 0) - (parseFloat(lastInv.tax_amount) || 0);
+    const template = {
+      name:       templateName,
+      line_items: [{ description: lastInv.service || 'Services', amount: subtotal > 0 ? subtotal : parseFloat(lastInv.total) }],
+      savedAt:    new Date().toISOString(),
+    };
+
+    const res = saveTemplate(userId, template);
+    if (res.error === 'max_templates') {
+      return send(chatId, '⚠️ You have 10 templates (max). Delete one first with /templates.');
+    }
+    return send(chatId,
+      `📌 *Template Saved: "${templateName}"*\n\nUse it anytime with /templates — one tap invoicing! ⚡`,
+      { reply_markup: { inline_keyboard: [[{ text: '📌 View Templates', callback_data: 'nav_templates' }]] }}
+    );
+  }
+
+  // ── Period-based commands (stats, download) ─────────────────────────────────
+  const period = /this month/i.test(lower)  ? 'this_month'
+               : /last month/i.test(lower)  ? 'last_month'
+               : /quarter/i.test(lower)     ? 'this_quarter'
+               : /this year/i.test(lower)   ? 'this_year'
+               : /\ball\b/i.test(lower)     ? 'all' : null;
   if (period) {
     delete commandState[userId];
-    if (state.type === 'stats') await showStats(chatId, userId, period);
-    else await downloadInvoicesByPeriod(chatId, userId, period);
+    if (state.type === 'stats') showStats(chatId, userId, period);
+    else downloadInvoices(chatId, userId, period);
   } else {
-    await bot.sendMessage(chatId, '⚠️ Please select a period using the buttons, or type "this month", "last month", "this year", or "all".');
+    send(chatId, '⚠️ Please use the buttons, or type: "this month", "last month", "this quarter", "this year", or "all".');
   }
 }
 
-// ─── AI: Intent Classification ────────────────────────────────────────────────
-async function classifyIntent(text) {
-  try {
-    const res = await axios.post('https://api.anthropic.com/v1/messages',
-      {
-        model:      'claude-haiku-4-5-20251001',
-        max_tokens: 10,
-        messages:   [{ role: 'user', content: `Classify as exactly one word — "invoice", "greeting", "help", or "invalid":\n"${text}"\nAnswer:` }]
-      },
-      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+// ─── Invoice Flow ─────────────────────────────────────────────────────────────
+async function handleInvoiceRequest(chatId, userId, text) {
+  if (!companyProfiles[userId]) {
+    return send(chatId, '⚠️ Please set up your profile first with /setup before creating invoices.');
+  }
+
+  await send(chatId, '⚡ Reading your invoice details...');
+
+  const result = await processInvoiceText(userId, text);
+
+  if (result.error === 'no_profile') return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  if (result.error === 'parse_failed') {
+    return send(chatId,
+      '⚠️ Couldn\'t parse invoice details. Try:\n_"[Service] for [Customer] for [Amount]"_\n\nExample: _"Web design for John Smith for 2000"_'
     );
-    const intent = res.data.content[0].text.toLowerCase().trim().replace(/[^a-z]/g, '');
-    return ['invoice', 'greeting', 'help', 'invalid'].includes(intent) ? intent : 'invalid';
-  } catch (err) {
-    console.error('Intent error:', err.message);
-    return 'invalid';
   }
-}
-
-// ─── Invoice Data Validation ──────────────────────────────────────────────────
-function validateExtractedData(data) {
-  const errors = [];
-  if (!data.customer_name?.trim())  errors.push('Missing customer name');
-  if (!data.line_items?.length)     errors.push('Missing service / item description');
-  const total = (data.line_items || []).reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
-  if (total <= 0)                   errors.push('Amount must be greater than 0');
-  return { valid: errors.length === 0, errors };
-}
-
-// ─── AI: Extract Invoice Data & Show Preview ──────────────────────────────────
-async function processInvoiceRequest(chatId, userId, text) {
-  try {
-    await bot.sendMessage(chatId, '⚡ Reading your invoice details...');
-
-    const res = await axios.post('https://api.anthropic.com/v1/messages',
-      {
-        model:      'claude-sonnet-4-5-20250929',
-        max_tokens: 1024,
-        messages:   [{
-          role:    'user',
-          content: `Extract invoice details from this text and return ONLY valid JSON, no other text.
-
-Text: "${text}"
-
-Return exactly this JSON structure:
-{
-  "customer_name": "full name of the person or company being billed",
-  "address": "location or job address mentioned, or null",
-  "line_items": [
-    { "description": "service or item name", "amount": 0.00 }
-  ]
-}
-
-Rules:
-- customer_name: who is being billed
-- line_items: one entry per service/item; if a single total covers multiple services, split equally
-- amount: number only, no currency symbols
-- address: delivery location or null`
-        }]
-      },
-      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+  if (result.error === 'validation') {
+    return send(chatId,
+      `⚠️ *Missing info:*\n${result.errors.map(e => `• ${e}`).join('\n')}\n\n` +
+      `_Example: "Consulting for Ahmed Al-Rashidi for 1500"_`
     );
-
-    let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) raw = m[0];
-
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      await bot.sendMessage(chatId,
-        '⚠️ Could not parse invoice details. Please try:\n_"[Service] for [Customer] for [Amount]"_\n\nExample: _"Web design for John Smith for 2000"_',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    const validation = validateExtractedData(data);
-    if (!validation.valid) {
-      await bot.sendMessage(chatId,
-        `⚠️ *Missing information:*\n${validation.errors.map(e => `• ${e}`).join('\n')}\n\n` +
-        `Please include: customer name, service description, and amount.\n\n` +
-        `Example: _"Consulting for Ahmed Al-Rashidi for 1500"_`,
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    const profile  = companyProfiles[userId];
-    const tc       = getTaxConfig(profile);
-    const subtotal = data.line_items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
-    const tax      = tc.enabled ? subtotal * (tc.rate / 100) : 0;
-    const total    = subtotal + tax;
-
-    // Store pending invoice
-    pendingInvoices[userId] = { data, profile, subtotal, tax, total, tc };
-
-    // Build preview message
-    let preview = `📋 *Invoice Preview*\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    preview += `👤 *Bill To:* ${data.customer_name}\n`;
-    if (data.address && data.address !== 'null' && data.address !== null) {
-      preview += `📍 ${data.address}\n`;
-    }
-    preview += `\n*Services:*\n`;
-    data.line_items.forEach(item => {
-      preview += `• ${item.description}: ${formatAmount(item.amount, profile.currency)}\n`;
-    });
-    preview += `\n━━━━━━━━━━━━━━━━━━━━━━\n`;
-    preview += `Subtotal: ${formatAmount(subtotal, profile.currency)}\n`;
-    if (tc.enabled) preview += `${tc.type} (${tc.rate}%): ${formatAmount(tax, profile.currency)}\n`;
-    preview += `💰 *Total: ${formatAmount(total, profile.currency)}*`;
-
-    await bot.sendMessage(chatId, preview, {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[
-        { text: '✅ Generate Invoice', callback_data: 'confirm_invoice' },
-        { text: '🔄 Try Again',        callback_data: 'retry_invoice'   }
-      ]]}
-    });
-
-  } catch (err) {
-    console.error('Invoice processing error:', err);
-    await bot.sendMessage(chatId, '⚠️ Error processing your request. Please try again.');
   }
-}
 
-// ─── Confirm & Generate Invoice ───────────────────────────────────────────────
-async function confirmAndGenerateInvoice(chatId, userId) {
-  const pending = pendingInvoices[userId];
-  if (!pending) {
-    await bot.sendMessage(chatId, '⚠️ No pending invoice found. Please describe your invoice again.');
-    return;
+  const { pending } = result;
+  const { data, profile, subtotal, tax, total, tc } = pending;
+  const curr = CURRENCIES[profile.currency] || {};
+
+  let preview = `📋 *Invoice Preview*\n`;
+  preview += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  preview += `🏢 *From:*  ${profile.company_name}\n`;
+  preview += `👤 *Bill To:*  ${data.customer_name}\n`;
+  if (data.address && data.address !== 'null' && data.address?.trim()) {
+    preview += `📍  ${data.address}\n`;
   }
-  delete pendingInvoices[userId];
+  preview += `\n`;
+  preview += `┌─ *Services ─────────────────┐*\n`;
+  data.line_items.forEach(item => {
+    const amtStr = formatAmount(item.amount, profile.currency);
+    // Pad description for alignment
+    preview += `│ ${item.description}\n`;
+    preview += `│   → *${amtStr}*\n`;
+  });
+  preview += `└──────────────────────────────┘\n\n`;
 
-  try {
-    await bot.sendMessage(chatId, '📄 Generating your PDF invoice...');
-
-    const { data, profile, subtotal, tax, total, tc } = pending;
-    const invoiceId = `INV-${Date.now()}`;
-    const date      = new Date().toLocaleDateString('en-GB');
-
-    const fullData = {
-      customer_name:   data.customer_name,
-      address:         data.address,
-      company_name:    profile.company_name,
-      company_address: profile.company_address,
-      trn:             profile.trn,
-      currency:        profile.currency,
-      bank_name:       profile.bank_name,
-      iban:            profile.iban,
-      account_name:    profile.account_name,
-      tax_enabled:     tc.enabled,
-      tax_rate:        tc.rate,
-      tax_type:        tc.type,
-      logo_path:       profile.logo_path,
-      invoice_id:      invoiceId,
-      date:            date,
-      line_items:      data.line_items,
-      subtotal:        subtotal.toFixed(2),
-      tax_amount:      tax.toFixed(2),
-      total:           total.toFixed(2)
-    };
-
-    const pdfPath      = await generateProfessionalInvoice(fullData);
-    const permanentPath = path.join(INVOICE_DIR, `${userId}_${invoiceId}.pdf`);
-    fs.copyFileSync(pdfPath, permanentPath);
-
-    if (!invoiceHistory[userId]) invoiceHistory[userId] = [];
-    invoiceHistory[userId].push({
-      invoice_id:    invoiceId,
-      customer_name: data.customer_name,
-      service:       data.line_items[0]?.description || 'Service',
-      total:         total.toFixed(2),
-      tax_amount:    tax.toFixed(2),
-      currency:      profile.currency,
-      date:          date,
-      file_path:     permanentPath
-    });
-    saveData();
-
-    // Payment link
-    const paymentResult = await createPaymentLink({
-      invoice_id:    invoiceId,
-      customer_name: data.customer_name,
-      total:         total.toFixed(2),
-      currency:      profile.currency
-    });
-
-    let caption = `📄 *${invoiceId}*\n👤 ${data.customer_name}\n💰 *${formatAmount(total, profile.currency)}*`;
-    if (paymentResult.success) {
-      caption += `\n\n💳 *Pay Online:*\n${paymentResult.paymentUrl}`;
-      invoiceHistory[userId][invoiceHistory[userId].length - 1].payment_link = paymentResult.paymentUrl;
-      saveData();
+  if (data.line_items.length > 1 || tc.enabled) {
+    if (data.line_items.length > 1) {
+      preview += `Subtotal:  ${formatAmount(subtotal, profile.currency)}\n`;
     }
-
-    await bot.sendDocument(chatId, pdfPath, { caption, parse_mode: 'Markdown' });
-    fs.unlinkSync(pdfPath);
-
-  } catch (err) {
-    console.error('Invoice generation error:', err);
-    await bot.sendMessage(chatId, '⚠️ Error generating invoice. Please try again.');
+    if (tc.enabled && tax > 0) {
+      preview += `${tc.type} ${tc.rate}%:  ${formatAmount(tax, profile.currency)}\n`;
+    }
+    preview += `\n`;
   }
-}
+  preview += `💰 *Total Due:  ${formatAmount(total, profile.currency)}*\n\n`;
+  preview += `${curr.flag || ''} ${profile.currency}  ·  ${new Date().toLocaleDateString('en-GB')}\n\n`;
+  preview += `_Looks good? Tap Generate to create your PDF._`;
 
-// ─── PDF Generation ───────────────────────────────────────────────────────────
-async function generateProfessionalInvoice(data) {
-  return new Promise((resolve, reject) => {
-    const pdfPath = `/tmp/invoice_${Date.now()}.pdf`;
-    const doc     = new PDFDocument({ margin: 0, size: 'A4' });
-    const stream  = fs.createWriteStream(pdfPath);
-    doc.pipe(stream);
-
-    const W         = 595.28;   // A4 width in points
-    const MARGIN    = 40;
-    const INNER_W   = W - MARGIN * 2;
-    const NAVY      = '#1a1a2e';
-    const ACCENT    = '#4361ee';
-    const LIGHT_BG  = '#f4f6ff';
-    const GREY_TEXT = '#666680';
-    const BLACK     = '#1a1a2e';
-    const WHITE     = '#ffffff';
-    const curr      = CURRENCIES[data.currency] || { symbol: data.currency };
-
-    const fmtAmt = (v) => {
-      const n = parseFloat(v || 0).toFixed(2);
-      return curr.right ? `${n} ${curr.symbol}` : `${curr.symbol}${n}`;
-    };
-
-    // ── Header bar ─────────────────────────────────────────────────────────────
-    doc.rect(0, 0, W, 90).fill(NAVY);
-
-    // Logo
-    if (data.logo_path && fs.existsSync(data.logo_path)) {
-      try { doc.image(data.logo_path, MARGIN, 12, { width: 60, height: 60 }); }
-      catch (_) {}
-    }
-
-    // Company info
-    const companyX = data.logo_path && fs.existsSync(data.logo_path) ? MARGIN + 72 : MARGIN;
-    doc.fillColor(WHITE).font('Helvetica-Bold').fontSize(15)
-       .text(data.company_name || '', companyX, 18, { width: 260 });
-    doc.font('Helvetica').fontSize(8.5).fillColor('#b0b8e0')
-       .text(data.company_address || '', companyX, 38, { width: 260 });
-    if (data.trn) {
-      doc.text(`TRN: ${data.trn}`, companyX, 54, { width: 260 });
-    }
-
-    // INVOICE label (right side of header)
-    doc.fillColor(ACCENT).font('Helvetica-Bold').fontSize(24)
-       .text('INVOICE', 390, 20, { align: 'right', width: 165 });
-    doc.fillColor('#8899cc').font('Helvetica').fontSize(8)
-       .text('For record-keeping purposes only', 390, 52, { align: 'right', width: 165 });
-
-    // ── Meta row ───────────────────────────────────────────────────────────────
-    let y = 100;
-    doc.roundedRect(MARGIN, y, INNER_W, 44, 6).fill(LIGHT_BG);
-
-    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(GREY_TEXT)
-       .text('INVOICE NUMBER', MARGIN + 14, y + 8);
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(BLACK)
-       .text(data.invoice_id, MARGIN + 14, y + 20);
-
-    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(GREY_TEXT)
-       .text('DATE', MARGIN + 200, y + 8);
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(BLACK)
-       .text(data.date, MARGIN + 200, y + 20);
-
-    // ── Bill To ────────────────────────────────────────────────────────────────
-    y += 58;
-    doc.roundedRect(MARGIN, y, 240, 62, 6).fill(LIGHT_BG);
-
-    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(GREY_TEXT)
-       .text('BILL TO', MARGIN + 14, y + 10);
-    doc.font('Helvetica-Bold').fontSize(12).fillColor(BLACK)
-       .text(data.customer_name || '', MARGIN + 14, y + 22, { width: 212 });
-
-    if (data.address && data.address !== 'null' && data.address !== null && data.address.trim() !== '') {
-      doc.font('Helvetica').fontSize(9).fillColor(GREY_TEXT)
-         .text(data.address, MARGIN + 14, y + 40, { width: 212 });
-    }
-
-    // ── Line Items Table ───────────────────────────────────────────────────────
-    y += 78;
-
-    // Table header
-    doc.rect(MARGIN, y, INNER_W, 26).fill(NAVY);
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(WHITE)
-       .text('DESCRIPTION', MARGIN + 12, y + 9)
-       .text('AMOUNT', W - MARGIN - 65, y + 9, { align: 'right', width: 65 });
-    y += 26;
-
-    let rowNum = 0;
-    (data.line_items || []).forEach(item => {
-      // New page if needed
-      if (y > 720) {
-        doc.addPage({ margin: 0, size: 'A4' });
-        y = 40;
-      }
-      const bg = rowNum % 2 === 0 ? WHITE : LIGHT_BG;
-      doc.rect(MARGIN, y, INNER_W, 26).fill(bg);
-
-      doc.font('Helvetica').fontSize(10).fillColor(BLACK)
-         .text(item.description || '', MARGIN + 12, y + 8, { width: 380 });
-      doc.text(fmtAmt(item.amount), W - MARGIN - 80, y + 8, { align: 'right', width: 80 });
-
-      y += 26;
-      rowNum++;
-    });
-
-    // ── Totals ─────────────────────────────────────────────────────────────────
-    y += 8;
-    if (y > 700) { doc.addPage({ margin: 0, size: 'A4' }); y = 40; }
-
-    doc.moveTo(MARGIN, y).lineTo(W - MARGIN, y).strokeColor('#d8ddf0').lineWidth(1).stroke();
-    y += 12;
-
-    // Subtotal row
-    doc.font('Helvetica').fontSize(10).fillColor(GREY_TEXT)
-       .text('Subtotal', W - MARGIN - 200, y)
-       .text(fmtAmt(data.subtotal), W - MARGIN - 80, y, { align: 'right', width: 80 });
-    y += 20;
-
-    // Tax row (if applicable)
-    if (data.tax_enabled && parseFloat(data.tax_amount) > 0) {
-      doc.text(`${data.tax_type} (${data.tax_rate}%)`, W - MARGIN - 200, y)
-         .text(fmtAmt(data.tax_amount), W - MARGIN - 80, y, { align: 'right', width: 80 });
-      y += 20;
-    }
-
-    // Total box
-    if (y > 710) { doc.addPage({ margin: 0, size: 'A4' }); y = 40; }
-    doc.rect(W - MARGIN - 210, y, 210, 34).fill(ACCENT);
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(WHITE)
-       .text('TOTAL DUE', W - MARGIN - 198, y + 11)
-       .text(fmtAmt(data.total), W - MARGIN - 80, y + 11, { align: 'right', width: 70 });
-    y += 50;
-
-    // ── Payment Details ────────────────────────────────────────────────────────
-    if (y > 690) { doc.addPage({ margin: 0, size: 'A4' }); y = 40; }
-
-    doc.roundedRect(MARGIN, y, INNER_W, 78, 6).fill(LIGHT_BG);
-    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(GREY_TEXT)
-       .text('PAYMENT DETAILS', MARGIN + 14, y + 10);
-    doc.font('Helvetica').fontSize(10).fillColor(BLACK)
-       .text(`Bank: ${data.bank_name || 'N/A'}`,       MARGIN + 14, y + 24)
-       .text(`IBAN: ${data.iban || 'N/A'}`,            MARGIN + 14, y + 40)
-       .text(`Account: ${data.account_name || 'N/A'}`, MARGIN + 14, y + 56);
-
-    // ── Footer ─────────────────────────────────────────────────────────────────
-    doc.rect(0, 818, W, 23).fill(NAVY);
-    doc.font('Helvetica').fontSize(7.5).fillColor('#8899cc')
-       .text('Generated by InvoKash  ·  For record-keeping purposes only  ·  Not a legally certified tax document',
-             MARGIN, 823, { align: 'center', width: INNER_W });
-
-    doc.end();
-    stream.on('finish', () => resolve(pdfPath));
-    stream.on('error', reject);
+  await send(chatId, preview, {
+    reply_markup: { inline_keyboard: [
+      [{ text: '✅ Generate Invoice PDF', callback_data: 'confirm_invoice' }],
+      [{ text: '🔄 Try Again',             callback_data: 'retry_invoice'   }]
+    ]}
   });
 }
 
-// ─── Lifecycle ────────────────────────────────────────────────────────────────
-bot.on('polling_error', (err) => console.error('Polling error:', err.message));
+async function handleConfirmInvoice(chatId, userId) {
+  if (!pendingInvoices[userId]) return send(chatId, '⚠️ No pending invoice. Please describe your invoice again.');
 
-process.on('SIGINT',  () => { saveData(); process.exit(0); });
-process.on('SIGTERM', () => { saveData(); process.exit(0); });
+  await send(chatId, '📄 Generating your PDF invoice...');
 
-setInterval(saveData, 5 * 60 * 1000);
+  try {
+    const result = await confirmInvoice(userId);
+    if (result.error) return send(chatId, '⚠️ Error generating invoice. Please try again.');
 
-console.log('✅ InvoKash Bot Ready!');
+    let caption =
+      `✅ *Invoice Generated!*\n\n` +
+      `📄 \`${result.invoiceId}\`\n` +
+      `👤 ${result.customer}\n` +
+      `💰 *${formatAmount(result.total, result.currency)}*`;
+    if (result.paymentUrl) {
+      caption += `\n\n💳 *Payment Link:*\n${result.paymentUrl}`;
+    }
+    caption += `\n\n_Tap ✅ Mark as Paid when your client settles._`;
+
+    await bot.sendDocument(chatId, result.pdfPath, { caption, parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [{ text: '✅ Mark as Paid',     callback_data: `paid_${result.invoiceId}` }],
+        [{ text: '📌 Save as Template', callback_data: 'save_template'            }],
+        [
+          { text: '📋 All Invoices',   callback_data: 'nav_invoices' },
+          { text: '🏠 Home',           callback_data: 'nav_home'     },
+        ]
+      ]}
+    });
+    try { fs.unlinkSync(result.pdfPath); } catch (_) {}
+
+  } catch (err) {
+    console.error('Invoice confirm error:', err.message);
+    send(chatId, '⚠️ Error generating invoice. Please try again.');
+  }
+}
+
+// ─── Quick Re-Invoice ─────────────────────────────────────────────────────────
+async function handleQuickReInvoice(chatId, userId, customerName, lastInv) {
+  const profile = companyProfiles[userId];
+  const curr    = CURRENCIES[profile.currency] || {};
+
+  let preview = `⚡ *Quick Re-Invoice*\n`;
+  preview += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  preview += `🔄 Based on your last invoice to *${customerName}*\n`;
+  preview += `📅 Original: ${lastInv.date}\n\n`;
+  preview += `👤 *Bill To:*  ${customerName}\n\n`;
+  preview += `┌─ *Services ───────────────────┐*\n`;
+  preview += `│ ${lastInv.service || 'Previous service'}\n`;
+  preview += `└──────────────────────────────┘\n\n`;
+  preview += `💰 *Amount:  ${formatAmount(lastInv.total, lastInv.currency || profile.currency)}*\n\n`;
+  preview += `${curr.flag || ''} ${profile.currency}  ·  ${new Date().toLocaleDateString('en-GB')}\n\n`;
+  preview += `_Tap Generate to create a new invoice with these details,\nor type a new amount to update it._`;
+
+  // Store a pending invoice based on the last one
+  const tc       = getTaxConfig(profile);
+  const total    = parseFloat(lastInv.total) || 0;
+  const taxAmt   = parseFloat(lastInv.tax_amount) || 0;
+  const subtotal = total - taxAmt;
+
+  const { pendingInvoices } = require('./core');
+  pendingInvoices[userId] = {
+    data: {
+      customer_name: customerName,
+      address: null,
+      line_items: [{ description: lastInv.service || 'Services', amount: subtotal > 0 ? subtotal : total }],
+    },
+    profile,
+    subtotal: subtotal > 0 ? subtotal : total,
+    tax: taxAmt,
+    total,
+    tc,
+  };
+
+  await send(chatId, preview, {
+    reply_markup: { inline_keyboard: [
+      [{ text: '✅ Generate Invoice PDF', callback_data: 'confirm_invoice' }],
+      [{ text: '🔄 Different Amount',     callback_data: 'retry_invoice'   }],
+    ]}
+  });
+}
+
+// ─── Invoice Aging Dashboard ──────────────────────────────────────────────────
+async function showAgingDashboard(chatId, userId) {
+  const invs = invoiceHistory[userId] || [];
+  if (invs.length === 0) return send(chatId,
+    `⏱ *No Invoices Yet*\n\nCreate your first invoice to start tracking receivables!`);
+
+  const report   = getAgingReport(userId);
+  const currency = report.currency;
+
+  let msg = `⏱ *Invoice Aging Report*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (report.count === 0) {
+    msg += `✅ *All invoices are paid!*\n\nGreat work — nothing outstanding. 🎉`;
+  } else {
+    msg += `💰 *Total Outstanding: ${formatAmount(report.totalUnpaid, currency)}*\n`;
+    msg += `📄 *${report.count}* unpaid invoice${report.count !== 1 ? 's' : ''}\n\n`;
+
+    for (const [key, bucket] of Object.entries(report.buckets)) {
+      if (bucket.invoices.length === 0) continue;
+      const bar = asciiBar(bucket.total, report.totalUnpaid || 1, 10);
+      msg += `${bucket.emoji} *${bucket.label}*\n`;
+      msg += `${bar}  ${formatAmount(bucket.total, currency)}\n`;
+      msg += `📄 ${bucket.invoices.length} invoice${bucket.invoices.length !== 1 ? 's' : ''}\n`;
+
+      // Show up to 3 invoices per bucket
+      bucket.invoices.slice(0, 3).forEach(inv => {
+        msg += `  • \`${inv.invoice_id}\` — ${inv.customer_name} — *${formatAmount(inv.total, inv.currency || currency)}* (${inv.daysOld}d)\n`;
+      });
+      if (bucket.invoices.length > 3) msg += `  _+${bucket.invoices.length - 3} more_\n`;
+      msg += '\n';
+    }
+
+    if (report.buckets.days90.invoices.length > 0) {
+      msg += `🔴 *Action Required:* ${report.buckets.days90.invoices.length} invoice${report.buckets.days90.invoices.length !== 1 ? 's' : ''} over 90 days — consider escalating collection.\n`;
+    }
+  }
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '📋 All Invoices', callback_data: 'nav_invoices' },
+      { text: '📊 Stats',        callback_data: 'nav_stats'    },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
+}
+
+// ─── Revenue Goals ────────────────────────────────────────────────────────────
+async function showGoalSetter(chatId, userId) {
+  if (!companyProfiles[userId]) {
+    return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  }
+  const goal     = getRevenueGoal(userId);
+  const profile  = companyProfiles[userId];
+  const currency = profile.currency;
+
+  const thisMonth  = filterInvoicesByPeriod(invoiceHistory[userId] || [], 'this_month');
+  const monthStats = calculateStats(thisMonth, currency);
+
+  let msg = `🎯 *Monthly Revenue Goal*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (goal) {
+    const pct = Math.min(100, Math.round((monthStats.total / goal.monthly) * 100));
+    const bar = asciiBar(monthStats.total, goal.monthly, 14);
+    msg += `*Current Goal:* ${formatAmount(goal.monthly, currency)}/month\n\n`;
+    msg += `${bar} ${pct}%\n`;
+    msg += `✅ Achieved: ${formatAmount(monthStats.total, currency)}\n`;
+    msg += `🎯 Remaining: ${formatAmount(Math.max(0, goal.monthly - monthStats.total), currency)}\n\n`;
+    if (pct >= 100) msg += `🎉 *Goal reached!* Excellent work this month!\n\n`;
+  } else {
+    msg += `You haven\'t set a monthly goal yet.\n\n`;
+  }
+  msg += `*Set a new monthly goal:*\n_Reply with a number (e.g. \`10000\`)_`;
+
+  commandState[userId] = { type: 'set_goal' };
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '📊 View Stats', callback_data: 'nav_stats' },
+      { text: '🏠 Home',       callback_data: 'nav_home'  },
+    ]
+  ]}});
+}
+
+// ─── Client Statement ─────────────────────────────────────────────────────────
+async function selectClientForStatement(chatId, userId) {
+  const invs = invoiceHistory[userId] || [];
+  if (invs.length === 0) return send(chatId,
+    `📄 *No Invoices Yet*\n\nCreate invoices first to generate client statements.`);
+
+  // Build unique client list
+  const clients = [...new Set(invs.map(i => i.customer_name?.trim()).filter(Boolean))];
+
+  if (clients.length === 0) return send(chatId, '⚠️ No clients found.');
+
+  let msg = `📄 *Client Statement PDF*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  msg += `Select a client to generate their full invoice statement:\n\n`;
+
+  // Show as inline buttons (up to 8 clients)
+  const keyboard = clients.slice(0, 8).map(name => ([{
+    text: `📄 ${name}`,
+    callback_data: `stmt_${name.slice(0, 30)}`,
+  }]));
+  keyboard.push([{ text: '🏠 Home', callback_data: 'nav_home' }]);
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleClientStatement(chatId, userId, customerName) {
+  await send(chatId, `📄 Generating statement for *${customerName}*...`);
+  try {
+    const result = await generateClientStatement(userId, customerName);
+    if (!result) return send(chatId, `⚠️ No invoices found for *${customerName}*.`);
+
+    const { pdfPath, invoiceCount, total, paid, outstanding, currency } = result;
+    const caption =
+      `📄 *Client Statement — ${customerName}*\n\n` +
+      `📋 ${invoiceCount} invoice${invoiceCount !== 1 ? 's' : ''}\n` +
+      `💰 Total: ${formatAmount(total, currency)}\n` +
+      `✅ Paid: ${formatAmount(paid, currency)}\n` +
+      `⏳ Outstanding: ${formatAmount(outstanding, currency)}`;
+
+    await bot.sendDocument(chatId, pdfPath, { caption, parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [
+          { text: '📋 All Invoices', callback_data: 'nav_invoices' },
+          { text: '🏠 Home',         callback_data: 'nav_home'     },
+        ]
+      ]}
+    });
+    try { fs.unlinkSync(pdfPath); } catch (_) {}
+  } catch (err) {
+    console.error('Statement error:', err.message);
+    send(chatId, '⚠️ Error generating statement. Please try again.');
+  }
+}
+
+// ─── Invoice Templates ────────────────────────────────────────────────────────
+async function showTemplates(chatId, userId) {
+  const templates = getTemplates(userId);
+
+  let msg = `📌 *Invoice Templates*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (templates.length === 0) {
+    msg += `You have no saved templates yet.\n\n`;
+    msg += `*How to save a template:*\n`;
+    msg += `After creating an invoice, tap *💾 Save as Template*\n\n`;
+    msg += `Templates let you re-invoice with one tap — perfect for recurring services.`;
+    return send(chatId, msg, { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }});
+  }
+
+  const profile = companyProfiles[userId];
+  const currency = profile?.currency || 'AED';
+
+  msg += `${templates.length} template${templates.length !== 1 ? 's' : ''} saved:\n\n`;
+  templates.forEach((t, i) => {
+    const total = (t.line_items || []).reduce((s, li) => s + (parseFloat(li.amount) || 0), 0);
+    msg += `${i + 1}. 📌 *${t.name}*\n`;
+    msg += `   ${t.line_items?.map(li => li.description).join(', ')}\n`;
+    msg += `   💰 ${formatAmount(total, currency)}\n\n`;
+  });
+
+  const keyboard = templates.slice(0, 8).map((t, i) => ([{
+    text: `⚡ Use "${t.name}"`,
+    callback_data: `tpl_use_${i}`,
+  }]));
+  keyboard.push([{ text: '🗑 Manage Templates', callback_data: 'tpl_manage' }]);
+  keyboard.push([{ text: '🏠 Home', callback_data: 'nav_home' }]);
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleTemplateUse(chatId, userId, templateIndex) {
+  const templates = getTemplates(userId);
+  const template  = templates[templateIndex];
+  if (!template) return send(chatId, '⚠️ Template not found.');
+
+  const profile = companyProfiles[userId];
+  if (!profile) return send(chatId, '⚠️ Please set up your profile first with /setup.');
+
+  const tc       = getTaxConfig(profile);
+  const subtotal = (template.line_items || []).reduce((s, li) => s + (parseFloat(li.amount) || 0), 0);
+  const tax      = tc.enabled ? subtotal * (tc.rate / 100) : 0;
+  const total    = subtotal + tax;
+  const curr     = CURRENCIES[profile.currency] || {};
+
+  let msg = `📌 *Template: ${template.name}*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  msg += `Who should this invoice go to?\n\n`;
+  msg += `*Services:*\n`;
+  (template.line_items || []).forEach(li => {
+    msg += `• ${li.description} — ${formatAmount(li.amount, profile.currency)}\n`;
+  });
+  if (tc.enabled) msg += `\n${tc.type} ${tc.rate}%: ${formatAmount(tax, profile.currency)}\n`;
+  msg += `\n💰 *Total: ${formatAmount(total, profile.currency)}*\n\n`;
+  msg += `_Type the customer name to create the invoice:_`;
+
+  commandState[userId] = { type: 'template_customer', template, subtotal, tax, total, tc };
+  await send(chatId, msg);
+}
+
+async function handleTemplateManage(chatId, userId) {
+  const templates = getTemplates(userId);
+  if (templates.length === 0) return send(chatId, '📌 No templates to manage.');
+
+  let msg = `🗑 *Manage Templates*\n\nTap a template to delete it:\n\n`;
+
+  const keyboard = templates.map((t, i) => ([{
+    text: `❌ Delete "${t.name}"`,
+    callback_data: `tpl_del_${i}`,
+  }]));
+  keyboard.push([{ text: '◀ Back', callback_data: 'nav_templates' }]);
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+// ─── Expense Tracker ──────────────────────────────────────────────────────────
+async function handleExpenseEntry(chatId, userId, text) {
+  if (!companyProfiles[userId]) {
+    return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  }
+  await send(chatId, '💸 _Processing expense..._');
+  try {
+    const data     = await extractExpenseData(sanitizeInput(text));
+    const profile  = companyProfiles[userId];
+    const currency = profile.currency;
+
+    if (!data.amount || parseFloat(data.amount) <= 0) {
+      return send(chatId, '⚠️ Couldn\'t detect an amount. Try:\n_"Spent 500 on petrol"_\n_"Office supplies 200"_');
+    }
+
+    // Store preview
+    commandState[userId] = { type: 'expense_confirm', expenseData: data };
+
+    const msg =
+      `💸 *Expense Preview*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📝 ${data.description}\n` +
+      `🏷 Category: *${data.category}*\n` +
+      `💰 *${formatAmount(data.amount, currency)}*\n\n` +
+      `_Looks right?_`;
+
+    await send(chatId, msg, { reply_markup: { inline_keyboard: [
+      [{ text: '✅ Log Expense', callback_data: 'exp_confirm' }],
+      [{ text: '❌ Cancel',     callback_data: 'exp_cancel'  }],
+    ]}});
+  } catch (err) {
+    console.error('Expense parse error:', err.message);
+    send(chatId, '⚠️ Couldn\'t parse expense. Try:\n_"Spent 300 on software"_\n_"Paid 150 for office supplies"_');
+  }
+}
+
+async function showExpenses(chatId, userId) {
+  const profile = companyProfiles[userId];
+  if (!profile) return send(chatId, '⚠️ Please set up your profile first.');
+
+  const expenses = expenseHistory[userId] || [];
+  const currency = profile.currency;
+
+  if (expenses.length === 0) {
+    return send(chatId,
+      `💸 *Expense Tracker*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `No expenses logged yet.\n\n` +
+      `*Log an expense by typing:*\n` +
+      `_"Spent 500 on petrol"_\n` +
+      `_"Office supplies 200"_\n` +
+      `_"Paid 1500 for subcontractor"_`,
+      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
+    );
+  }
+
+  const recent    = expenses.slice(-10).reverse();
+  const thisMonth = getExpenses(userId, 'this_month');
+  const monthTotal= thisMonth.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const allTotal  = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+
+  let msg = `💸 *Expense Tracker*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  msg += `📅 This Month: *${formatAmount(monthTotal, currency)}*\n`;
+  msg += `📊 All Time: ${formatAmount(allTotal, currency)}\n\n`;
+  msg += `*Recent Expenses:*\n\n`;
+
+  const catEmoji = { Travel: '✈️', Software: '💻', Office: '🏢', Marketing: '📣', Subcontractors: '👷', Equipment: '🔧', Other: '📦' };
+  recent.forEach(exp => {
+    const icon = catEmoji[exp.category] || '📦';
+    msg += `${icon} *${formatAmount(exp.amount, exp.currency || currency)}* — ${exp.description}\n`;
+    msg += `   🏷 ${exp.category}  ·  📅 ${exp.date}\n\n`;
+  });
+
+  if (expenses.length > 10) msg += `_+${expenses.length - 10} older expenses_\n`;
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '📈 P&L Report',   callback_data: 'nav_profit'  },
+      { text: '📊 Stats',        callback_data: 'nav_stats'   },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
+}
+
+async function showProfitLoss(chatId, userId, period) {
+  const profile = companyProfiles[userId];
+  if (!profile) return send(chatId, '⚠️ Please set up your profile first.');
+
+  const pl       = calculateProfitLoss(userId, period);
+  const currency = profile.currency;
+  const isProfit = pl.profit >= 0;
+
+  let msg = `📈 *Profit & Loss — ${PERIOD_NAMES[period] || period}*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  msg += `💰 Revenue:   *${formatAmount(pl.revenue, currency)}*\n`;
+  msg += `💸 Expenses:  *${formatAmount(pl.expenses, currency)}*\n`;
+  msg += `\n`;
+  msg += `${isProfit ? '✅' : '🔴'} *${isProfit ? 'Profit' : 'Loss'}:  ${formatAmount(Math.abs(pl.profit), currency)}*\n`;
+  msg += `📊 Margin:  ${pl.margin.toFixed(1)}%\n\n`;
+
+  if (Object.keys(pl.byCategory).length > 0) {
+    const maxExp = Math.max(...Object.values(pl.byCategory));
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `🏷 *Expense Breakdown*\n\n`;
+    const catEmoji = { Travel: '✈️', Software: '💻', Office: '🏢', Marketing: '📣', Subcontractors: '👷', Equipment: '🔧', Other: '📦' };
+    Object.entries(pl.byCategory).sort((a, b) => b[1] - a[1]).forEach(([cat, amt]) => {
+      const bar  = asciiBar(amt, maxExp || 1, 10);
+      const icon = catEmoji[cat] || '📦';
+      msg += `${icon} *${cat}*\n   ${bar}  ${formatAmount(amt, currency)}\n\n`;
+    });
+  }
+
+  if (pl.invoiceCount === 0 && pl.expenseCount === 0) {
+    msg += `_No data for this period. Try "All Time"._\n`;
+  }
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '💸 Log Expense', callback_data: 'nav_expenses'    },
+      { text: '📊 Revenue',     callback_data: 'nav_stats'       },
+    ],
+    [
+      { text: '📅 This Month',  callback_data: 'profit_this_month'  },
+      { text: '📅 This Year',   callback_data: 'profit_this_year'   },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
+}
+
+// ─── AI Insights Handler ──────────────────────────────────────────────────────
+async function handleAIInsights(chatId, userId, period) {
+  const invs = invoiceHistory[userId] || [];
+  if (invs.length === 0) return send(chatId, '⚠️ No invoice data to analyze yet.');
+
+  const filtered = filterInvoicesByPeriod(invs, period);
+  if (filtered.length === 0) return send(chatId, `⚠️ No invoices for ${PERIOD_NAMES[period] || period}.`);
+
+  await send(chatId, '🤖 _Analyzing your business data..._');
+
+  const currency = companyProfiles[userId]?.currency || 'AED';
+  const stats    = calculateStats(filtered, currency);
+  const insight  = await generateBusinessInsights(userId, stats, PERIOD_NAMES[period] || period);
+
+  if (!insight) return send(chatId, '⚠️ Couldn\'t generate insights right now. Please try again.');
+
+  const msg =
+    `🤖 *AI Business Insights*\n` +
+    `📅 ${PERIOD_NAMES[period] || period}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `${insight}\n\n` +
+    `_Powered by Claude AI_`;
+
+  await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [
+      { text: '📊 Full Stats',   callback_data: `stats_${period}` },
+      { text: '🎯 Set Goal',     callback_data: 'nav_goal'        },
+    ],
+    [{ text: '🏠 Home', callback_data: 'nav_home' }]
+  ]}});
+}
+
+// ─── Start Function ───────────────────────────────────────────────────────────
+function startTelegramBot() {
+  if (!TELEGRAM_TOKEN) {
+    console.warn('⚠️  TELEGRAM_TOKEN not set — Telegram bot disabled.');
+    return;
+  }
+
+  // Initialize bot now that we have a token
+  bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+  // Re-attach handlers now that bot is initialized
+  bot.on('polling_error', (err) => console.error('Polling error:', err.message));
+
+  // Message handler
+  bot.on('message', async (msg) => {
+    const chatId    = msg.chat.id;
+    const userId    = String(msg.from.id);
+    const text      = msg.text || '';
+    const firstName = msg.from.first_name || 'there';
+
+    if (!checkRateLimit(userId)) {
+      return send(chatId, '⏱ You\'re sending too fast — please wait a moment.');
+    }
+
+    try {
+      if (text.startsWith('/')) { await handleCommand(chatId, userId, text, firstName); return; }
+      if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
+      if (!companyProfiles[userId] && !onboardingState[userId]) { await showLanding(chatId, firstName); return; }
+      if (msg.voice) { await handleVoiceMessage(chatId, userId, msg.voice, firstName); return; }
+      if (onboardingState[userId]) { await handleOnboarding(chatId, userId, text); return; }
+      if (commandState[userId]) { await handleCommandState(chatId, userId, text); return; }
+      if (text) await handleTextMessage(chatId, userId, text, firstName);
+    } catch (err) {
+      console.error('Message handler error:', err.message);
+      send(chatId, '⚠️ Something went wrong. Please try again or use /help.');
+    }
+  });
+
+  // Callback query handler
+  bot.on('callback_query', async (query) => {
+    const chatId    = query.message.chat.id;
+    const userId    = String(query.from.id);
+    const data      = query.data;
+    const firstName = query.from.first_name || 'there';
+
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    if (!checkRateLimit(userId)) return;
+
+    try {
+      if      (data === 'cmd_setup')         startOnboarding(chatId, userId, firstName);
+      else if (data === 'cmd_help')          showHelp(chatId);
+      else if (data === 'setup_agree')       handleOnboarding(chatId, userId, 'agree');
+      else if (data === 'setup_cancel') {
+        delete onboardingState[userId];
+        send(chatId, '❌ Setup cancelled. Use /setup to restart any time.');
+      }
+      else if (data === 'setup_skip')        handleOnboarding(chatId, userId, 'skip');
+      else if (data.startsWith('currency_')) handleOnboarding(chatId, userId, data.replace('currency_', ''));
+      else if (data === 'currency_more')     showCurrencyPage(chatId, userId, 1);
+      else if (data === 'currency_back')     showCurrencyPage(chatId, userId, 0);
+      else if (data === 'tax_yes')           handleOnboarding(chatId, userId, 'yes');
+      else if (data === 'tax_no')            handleOnboarding(chatId, userId, 'no');
+      else if (data.startsWith('stats_'))    showStats(chatId, userId, data.replace('stats_', ''));
+      else if (data.startsWith('dl_'))       downloadInvoices(chatId, userId, data.replace('dl_', ''));
+      else if (data === 'confirm_invoice')   handleConfirmInvoice(chatId, userId);
+      else if (data === 'retry_invoice') {
+        delete pendingInvoices[userId];
+        send(chatId, '🔄 Let\'s try again.\n\nDescribe your invoice:\n_"Plumbing for Ahmed at Marina for 500"_');
+      }
+      else if (data === 'nav_home')          showWelcome(chatId, userId, firstName);
+      else if (data === 'nav_invoices')      showInvoices(chatId, userId);
+      else if (data === 'nav_stats')         showPeriodSelector(chatId, userId, 'stats');
+      else if (data === 'nav_profile')       showProfile(chatId, userId);
+      else if (data === 'nav_download')      showPeriodSelector(chatId, userId, 'download');
+      else if (data === 'nav_customers')     showCustomers(chatId, userId);
+      else if (data === 'nav_aging')         showAgingDashboard(chatId, userId);
+      else if (data === 'nav_goal')          showGoalSetter(chatId, userId);
+      else if (data === 'nav_templates')     showTemplates(chatId, userId);
+      else if (data === 'nav_expenses')      showExpenses(chatId, userId);
+      else if (data === 'nav_profit')        showProfitLoss(chatId, userId, 'this_month');
+      else if (data === 'nav_statement')     selectClientForStatement(chatId, userId);
+      else if (data.startsWith('stmt_'))     handleClientStatement(chatId, userId, data.replace('stmt_', ''));
+      else if (data.startsWith('insights_')) handleAIInsights(chatId, userId, data.replace('insights_', ''));
+      else if (data.startsWith('profit_'))   showProfitLoss(chatId, userId, data.replace('profit_', ''));
+      else if (data.startsWith('tpl_use_'))  handleTemplateUse(chatId, userId, parseInt(data.replace('tpl_use_', '')));
+      else if (data === 'tpl_manage')        handleTemplateManage(chatId, userId);
+      else if (data.startsWith('tpl_del_')) {
+        const idx = parseInt(data.replace('tpl_del_', ''));
+        const templates = getTemplates(userId);
+        if (templates[idx]) {
+          deleteTemplate(userId, templates[idx].name);
+          send(chatId, `🗑 Template "*${templates[idx].name}*" deleted.`, { reply_markup: { inline_keyboard: [[{ text: '📌 Templates', callback_data: 'nav_templates' }]] }});
+        }
+      }
+      else if (data === 'exp_confirm') {
+        const state = commandState[userId];
+        if (state?.type === 'expense_confirm' && state.expenseData) {
+          const expense = logExpense(userId, state.expenseData);
+          delete commandState[userId];
+          const currency = companyProfiles[userId]?.currency || 'AED';
+          send(chatId,
+            `✅ *Expense Logged!*\n\n📝 ${expense.description}\n🏷 ${expense.category}\n💰 *${formatAmount(expense.amount, currency)}*\n\n_Tap P&L to see your profit margin._`,
+            { reply_markup: { inline_keyboard: [
+              [{ text: '📈 P&L Report', callback_data: 'nav_profit' }],
+              [{ text: '🏠 Home',       callback_data: 'nav_home'   }],
+            ]}}
+          );
+        }
+      }
+      else if (data === 'exp_cancel') {
+        delete commandState[userId];
+        send(chatId, '❌ Expense cancelled.');
+      }
+      else if (data === 'save_template') {
+        const lastInv = (invoiceHistory[userId] || []).slice(-1)[0];
+        if (!lastInv) return send(chatId, '⚠️ No invoice to save as template.');
+        commandState[userId] = { type: 'template_name', lastInv };
+        send(chatId, `📌 *Save as Template*\n\nGive this template a name:\n_e.g. "Monthly Retainer", "Web Design", "Consulting"_`);
+      }
+      else if (data.startsWith('paid_'))     handleMarkPaid(chatId, userId, data.replace('paid_', ''));
+      else if (data === 'deletedata_confirm') {
+        delete companyProfiles[userId];
+        delete invoiceHistory[userId];
+        saveData();
+        send(chatId, '🗑 All data deleted.\n\nUse /setup to start fresh any time. 👋');
+      }
+      else if (data === 'deletedata_cancel') {
+        send(chatId, '✅ *Nothing was deleted.* Your data is safe! 🔒', { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }});
+      }
+    } catch (err) {
+      console.error('Callback error:', err.message);
+      send(chatId, '⚠️ Something went wrong. Please try again.');
+    }
+  });
+
+  console.log('✅ Telegram bot started (polling)');
+}
+
+// ─── Notify helper (used by scheduler) ───────────────────────────────────────
+async function telegramNotify(userId, message, opts = {}) {
+  if (!bot) return;
+  try {
+    await bot.sendMessage(parseInt(userId), message, { parse_mode: 'Markdown', ...opts });
+  } catch (err) {
+    console.error(`Scheduler notify error for ${userId}:`, err.message);
+  }
+}
+
+module.exports = { startTelegramBot, telegramNotify };
