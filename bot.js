@@ -1925,33 +1925,70 @@ async function handleWaSendInvoice(chatId, userId, invoiceId) {
   const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
   if (!inv) return send(chatId, '⚠️ Invoice not found.');
 
+  const WA_TOKEN   = process.env.WHATSAPP_TOKEN;
+  const WA_PHONE   = process.env.WHATSAPP_PHONE_ID;
+
+  if (!WA_TOKEN || !WA_PHONE) {
+    return send(chatId,
+      '⚠️ *WhatsApp sending not configured.*\n\nAdd `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_ID` to your `.env` file on the VPS to enable direct client delivery.',
+      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
+    );
+  }
+
   const clientPhone = getClientWhatsApp(userId, inv.customer_name);
 
   if (clientPhone) {
-    // Send via WhatsApp
     await send(chatId, `📱 _Sending to ${inv.customer_name} at ${clientPhone}..._`);
     try {
-      const WHATSAPP_TOKEN    = process.env.WHATSAPP_TOKEN;
-      const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
-      if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) {
-        return send(chatId, '⚠️ WhatsApp sending not configured. Add WHATSAPP_TOKEN and WHATSAPP_PHONE_ID to enable.');
-      }
       const profile = companyProfiles[userId];
-      const msg = `Hello ${inv.customer_name} 👋\n\nPlease find attached Invoice \`${invoiceId}\` from *${profile?.company_name || 'InvoKash'}*.\n\nAmount: *${formatAmount(inv.total, inv.currency)}*\nDate: ${inv.date}${inv.payment_link ? `\n\n💳 Pay online: ${inv.payment_link}` : ''}\n\nThank you! 🙏`;
+      // Plain text only — no Markdown (WhatsApp API rejects asterisks/backticks in some regions)
+      const waMsg = [
+        `Hello ${inv.customer_name} 👋`,
+        ``,
+        `Invoice ${invoiceId} from ${profile?.company_name || 'InvoKash'}`,
+        `Amount: ${formatAmount(inv.total, inv.currency || profile?.currency)}`,
+        `Date: ${inv.date}`,
+        inv.payment_link ? `\nPay online: ${inv.payment_link}` : '',
+        ``,
+        `Thank you for your business! 🙏`,
+      ].join('\n');
 
-      // Send text message
-      await axios.post(`https://graph.facebook.com/v19.0/${WHATSAPP_PHONE_ID}/messages`, {
-        messaging_product: 'whatsapp', to: clientPhone.replace('+', ''),
-        type: 'text', text: { body: msg },
-      }, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } });
+      const resp = await axios.post(
+        `https://graph.facebook.com/v19.0/${WA_PHONE}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: clientPhone.replace(/[^0-9]/g, ''),   // digits only, no +
+          type: 'text',
+          text: { body: waMsg },
+        },
+        {
+          headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' },
+          timeout: 12000,   // 12-second timeout — prevents hanging
+        }
+      );
+
+      console.log(`WA send OK → ${clientPhone}:`, resp.data?.messages?.[0]?.id);
 
       await send(chatId,
-        `✅ *Invoice sent to ${inv.customer_name}!*\n\n📱 ${clientPhone}\n_They received the invoice + payment link._`,
-        { reply_markup: { inline_keyboard: [[{ text: '📋 Invoices', callback_data: 'nav_invoices' }, { text: '🏠 Home', callback_data: 'nav_home' }]] }}
+        `✅ *Invoice sent to ${inv.customer_name}!*\n\n📱 ${clientPhone}\n_They received the invoice details` +
+        `${inv.payment_link ? ' + payment link' : ''}._`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📋 Invoices', callback_data: 'nav_invoices' }],
+          [{ text: '🏠 Home',     callback_data: 'nav_home'     }],
+        ]}}
       );
     } catch (err) {
-      console.error('WA send error:', err.message);
-      send(chatId, `⚠️ Couldn\'t send via WhatsApp: ${err.message}`);
+      const detail = err.response?.data?.error?.message || err.message || 'Unknown error';
+      console.error('WA send error:', detail);
+      send(chatId,
+        `⚠️ *Couldn't send to ${inv.customer_name}*\n\n_${detail}_\n\n` +
+        `Check that:\n• The number format is correct (e.g. +971501234567)\n` +
+        `• Your WhatsApp Business account is active\n• The recipient has WhatsApp`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📱 Update Number', callback_data: `wa_send_${invoiceId}` }],
+          [{ text: '🏠 Home',          callback_data: 'nav_home'             }],
+        ]}}
+      );
     }
   } else {
     // Ask for phone number
