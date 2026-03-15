@@ -538,11 +538,13 @@ function handleMarkPaid(chatId, userId, invoiceId) {
   if (result) {
     // Find the invoice for amount
     const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
-    const amtStr = inv ? ` · ${formatAmount(inv.total, inv.currency)}` : '';
+    const customer = inv?.customer_name || 'Client';
+    const amount   = inv ? formatAmount(inv.total, inv.currency) : '';
     send(chatId,
-      `💰 *Payment received!*${amtStr} 🎉\n\n` +
-      `\`${invoiceId}\` is now marked paid.\n\n` +
-      `_Ready for the next one? Just type or 🎤 voice._`,
+      `💰 *${customer} paid!*\n\n` +
+      `${amount ? `*${amount}* received` : invoiceId}\n` +
+      `\`${invoiceId}\` marked as paid ✅\n\n` +
+      `_Ready for the next invoice? Just type or 🎤 voice._`,
       { reply_markup: { inline_keyboard: [
         [
           { text: '📊 Stats',     callback_data: 'nav_stats'    },
