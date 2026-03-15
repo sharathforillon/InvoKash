@@ -589,7 +589,12 @@ async function showInvoices(chatId, userId) {
 }
 
 // ─── Mark Invoice Paid ────────────────────────────────────────────────────────
-function handleMarkPaid(chatId, userId, invoiceId) {
+function handleMarkPaid(chatId, userId, invoiceId, queryId) {
+  // Acknowledge button press immediately (prevents loop & loading spinner)
+  if (queryId) {
+    bot.answerCallbackQuery(queryId, { text: '✅ Marked as paid', show_alert: false }).catch(() => {});
+  }
+
   const result = markInvoicePaid(userId, invoiceId);
   if (result) {
     // Find the invoice for amount
@@ -1903,7 +1908,10 @@ async function showBrandingSettings(chatId, userId) {
 }
 
 // ─── Partial Payment Handler ────────────────────────────────────────────────────
-async function handlePartialPayment(chatId, userId, invoiceId) {
+async function handlePartialPayment(chatId, userId, invoiceId, queryId) {
+  if (queryId) {
+    bot.answerCallbackQuery(queryId).catch(() => {});
+  }
   const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
   if (!inv) return send(chatId, '⚠️ Invoice not found.');
 
@@ -1921,7 +1929,10 @@ async function handlePartialPayment(chatId, userId, invoiceId) {
 }
 
 // ─── WA Send Invoice to Client ─────────────────────────────────────────────────
-async function handleWaSendInvoice(chatId, userId, invoiceId) {
+async function handleWaSendInvoice(chatId, userId, invoiceId, queryId) {
+  if (queryId) {
+    bot.answerCallbackQuery(queryId).catch(() => {});
+  }
   const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
   if (!inv) return send(chatId, '⚠️ Invoice not found.');
 
@@ -2174,10 +2185,10 @@ function startTelegramBot() {
         commandState[userId] = { type: 'template_name', lastInv };
         send(chatId, `📌 *Save as Template*\n\nGive this template a name:\n_e.g. "Monthly Retainer", "Web Design", "Consulting"_`);
       }
-      else if (data.startsWith('paid_'))     handleMarkPaid(chatId, userId, data.replace('paid_', ''));
+      else if (data.startsWith('paid_'))     handleMarkPaid(chatId, userId, data.replace('paid_', ''), query.id);
       // v2.2 callbacks
-      else if (data.startsWith('partial_'))  handlePartialPayment(chatId, userId, data.replace('partial_', ''));
-      else if (data.startsWith('wa_send_'))  handleWaSendInvoice(chatId, userId, data.replace('wa_send_', ''));
+      else if (data.startsWith('partial_'))  handlePartialPayment(chatId, userId, data.replace('partial_', ''), query.id);
+      else if (data.startsWith('wa_send_'))  handleWaSendInvoice(chatId, userId, data.replace('wa_send_', ''), query.id);
       else if (data === 'save_as_quote') {
         const pending = pendingInvoices[userId];
         if (!pending) return send(chatId, '⚠️ No pending quote data. Try describing the invoice again.');
