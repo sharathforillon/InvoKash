@@ -6,7 +6,7 @@
  * Skips already-paid invoices and avoids duplicate alerts (tracked per session)
  */
 
-const { invoiceHistory, companyProfiles, formatAmount } = require('./core');
+const { invoiceHistory, companyProfiles, formatAmount, getClientWhatsApp, processRecurringInvoices } = require('./core');
 
 // Track which invoices have already been notified this session
 // (avoids re-pinging on every restart)
@@ -25,11 +25,11 @@ function initScheduler(telegramNotifyFn, waSendFn = null) {
   _waSend         = waSendFn;
 
   // Run once on startup (after a short delay so bots are ready)
-  setTimeout(runOverdueCheck, 15 * 1000);
+  setTimeout(runAllChecks, 15 * 1000);
 
   // Then every 6 hours
-  setInterval(runOverdueCheck, 6 * 60 * 60 * 1000);
-  console.log('✅ Overdue reminder scheduler started (checks every 6h)');
+  setInterval(runAllChecks, 6 * 60 * 60 * 1000);
+  console.log('✅ Scheduler started (overdue reminders + recurring invoices, checks every 6h)');
 }
 
 async function runOverdueCheck() {
@@ -83,15 +83,37 @@ async function runOverdueCheck() {
         }).catch(err => console.error(`Scheduler Telegram error [${userId}]:`, err.message));
       }
 
-      // ── WhatsApp notification ─────────────────────────────────────────────
+      // ── WhatsApp notification to owner ──────────────────────────────────
       if (_waSend && userId.startsWith('wa_')) {
         const phone = userId.replace('wa_', '');
         const waTxt = msg.replace(/\*([^*]+)\*/g, '$1').replace(/`([^`]+)`/g, '$1'); // strip Markdown
         await _waSend(phone, waTxt)
           .catch(err => console.error(`Scheduler WhatsApp error [${phone}]:`, err.message));
       }
+
+      // ── Auto-remind CLIENT via WhatsApp (if number saved) ────────────────
+      if (_waSend) {
+        const clientPhone = getClientWhatsApp(userId, inv.customer_name);
+        if (clientPhone) {
+          const dueAmt = formatAmount(inv.remaining || inv.total, inv.currency || profile.currency);
+          const payLink = inv.payment_link ? `\n\nPay here: ${inv.payment_link}` : '';
+          const clientMsg =
+            `Hi ${inv.customer_name} 👋\n\n` +
+            `This is a friendly reminder that Invoice ${inv.invoice_id} from ${profile.company_name} ` +
+            `for ${dueAmt} is ${daysOld} days overdue.${payLink}\n\n` +
+            `Please get in touch if you have any questions. Thank you! 🙏`;
+          await _waSend(clientPhone, clientMsg)
+            .catch(err => console.error(`Client reminder error [${clientPhone}]:`, err.message));
+        }
+      }
     }
   }
+}
+
+async function runAllChecks() {
+  await runOverdueCheck();
+  await processRecurringInvoices(_telegramNotify, _waSend)
+    .catch(err => console.error('Recurring invoice error:', err.message));
 }
 
 module.exports = { initScheduler };

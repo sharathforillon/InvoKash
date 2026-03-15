@@ -15,10 +15,11 @@ if (missing.length) {
 }
 
 // Soft warnings for optional but important vars
-if (!process.env.TELEGRAM_TOKEN)     console.warn('⚠️  TELEGRAM_TOKEN not set — Telegram bot disabled.');
-if (!process.env.OPENAI_API_KEY)     console.warn('⚠️  OPENAI_API_KEY not set — Voice transcription disabled.');
-if (!process.env.STRIPE_SECRET_KEY)  console.warn('⚠️  STRIPE_SECRET_KEY not set — Payment links disabled.');
-if (!process.env.WHATSAPP_TOKEN)     console.warn('⚠️  WHATSAPP_TOKEN not set — WhatsApp disabled.');
+if (!process.env.TELEGRAM_TOKEN)        console.warn('⚠️  TELEGRAM_TOKEN not set — Telegram bot disabled.');
+if (!process.env.OPENAI_API_KEY)        console.warn('⚠️  OPENAI_API_KEY not set — Voice transcription disabled.');
+if (!process.env.STRIPE_SECRET_KEY)     console.warn('⚠️  STRIPE_SECRET_KEY not set — Payment links disabled.');
+if (!process.env.WHATSAPP_TOKEN)        console.warn('⚠️  WHATSAPP_TOKEN not set — WhatsApp disabled.');
+if (!process.env.STRIPE_WEBHOOK_SECRET) console.warn('⚠️  STRIPE_WEBHOOK_SECRET not set — Stripe auto-paid notifications disabled.');
 
 console.log('🚀 InvoKash v2 starting...');
 

@@ -24,6 +24,8 @@ const {
   getExpenses, calculateProfitLoss,
 } = require('./core');
 
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+
 const WHATSAPP_TOKEN   = process.env.WHATSAPP_TOKEN;
 const PHONE_ID         = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN     = process.env.WHATSAPP_VERIFY_TOKEN || 'invokash_webhook_secret';
@@ -980,6 +982,60 @@ async function waShowProfit(to, userId) {
 
   await waSend(to, msg);
 }
+
+// ─── Stripe Webhook — Auto-mark invoice paid ──────────────────────────────────
+app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  let event;
+
+  // Verify Stripe signature if secret is configured
+  if (STRIPE_WEBHOOK_SECRET) {
+    let stripe;
+    try { stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); } catch (_) {}
+    if (stripe) {
+      const sig = req.headers['stripe-signature'];
+      try {
+        event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+      } catch (err) {
+        console.error('Stripe webhook signature error:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+    } else {
+      event = JSON.parse(req.body);
+    }
+  } else {
+    // No secret configured — parse directly (dev/testing mode)
+    try { event = JSON.parse(req.body); } catch { return res.status(400).send('Invalid JSON'); }
+  }
+
+  // Handle payment success events
+  if (['checkout.session.completed', 'payment_intent.succeeded'].includes(event.type)) {
+    const obj = event.data.object;
+    const invoiceId = obj.metadata?.invoice_id;
+
+    if (invoiceId) {
+      // Find which user owns this invoice
+      for (const [userId, invs] of Object.entries(invoiceHistory)) {
+        const inv = (invs || []).find(i => i.invoice_id === invoiceId);
+        if (inv && inv.status !== 'paid') {
+          markInvoicePaid(userId, invoiceId);
+          const amount = formatAmount(inv.total, inv.currency);
+          console.log(`✅ Stripe auto-paid: ${invoiceId} for ${inv.customer_name} (${amount})`);
+
+          // Notify the business owner via WhatsApp if they are a WA user
+          if (waSend && userId.startsWith('wa_')) {
+            const phone = userId.replace('wa_', '');
+            await waSend(phone,
+              `💰 Payment Received!\n\n${inv.customer_name} paid ${amount} via Stripe.\nInvoice ${invoiceId} is now marked as paid ✅`
+            ).catch(() => {});
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
 
 // ─── Server Start ─────────────────────────────────────────────────────────────
 function startWhatsAppServer() {

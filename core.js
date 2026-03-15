@@ -58,6 +58,23 @@ const GOALS_FILE     = path.join(DATA_DIR, 'goals.json');
 const TEMPLATES_FILE = path.join(DATA_DIR, 'templates.json');
 const EXPENSES_FILE  = path.join(DATA_DIR, 'expenses.json');
 
+// ─── v2.2 Feature State (Catalogue, Quotes, Clients, Recurring, Credits, Branding) ──
+const servicesCatalogue = {}; // { userId: [{ id, name, description, defaultPrice }] }
+const quoteHistory      = {}; // { userId: [{ quote_id, date, customer_name, data, status, invoice_id }] }
+const quoteCounters     = {}; // { userId: lastQuoteNumber }
+const clientDirectory   = {}; // { userId: { normalizedName: { whatsapp, email } } }
+const recurringInvoices = {}; // { userId: [{ id, name, templateData, frequency, nextDue, active, lastRun }] }
+const creditNotes       = {}; // { userId: [{ credit_id, original_invoice_id, amount, reason, date }] }
+const creditCounters    = {}; // { userId: lastCreditNumber }
+const brandingSettings  = {}; // { userId: { accentColor, thankYouMessage, footerNote } }
+
+const CATALOGUE_FILE = path.join(DATA_DIR, 'catalogue.json');
+const QUOTES_FILE    = path.join(DATA_DIR, 'quotes.json');
+const CLIENTS_FILE   = path.join(DATA_DIR, 'clients.json');
+const RECURRING_FILE = path.join(DATA_DIR, 'recurring.json');
+const CREDITS_FILE   = path.join(DATA_DIR, 'credits.json');
+const BRANDING_FILE  = path.join(DATA_DIR, 'branding.json');
+
 // ─── OpenAI Client ────────────────────────────────────────────────────────────
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -92,12 +109,19 @@ const EXPENSE_CATEGORIES = ['Travel', 'Software', 'Office', 'Marketing', 'Subcon
 // ─── Data Persistence ─────────────────────────────────────────────────────────
 function loadData() {
   try {
-    if (fs.existsSync(PROFILES_FILE)) Object.assign(companyProfiles,  JSON.parse(fs.readFileSync(PROFILES_FILE,  'utf8')));
-    if (fs.existsSync(HISTORY_FILE))  Object.assign(invoiceHistory,   JSON.parse(fs.readFileSync(HISTORY_FILE,   'utf8')));
-    if (fs.existsSync(COUNTER_FILE))  Object.assign(invoiceCounters,  JSON.parse(fs.readFileSync(COUNTER_FILE,   'utf8')));
-    if (fs.existsSync(GOALS_FILE))    Object.assign(revenueGoals,     JSON.parse(fs.readFileSync(GOALS_FILE,     'utf8')));
-    if (fs.existsSync(TEMPLATES_FILE))Object.assign(invoiceTemplates, JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8')));
-    if (fs.existsSync(EXPENSES_FILE)) Object.assign(expenseHistory,   JSON.parse(fs.readFileSync(EXPENSES_FILE,  'utf8')));
+    if (fs.existsSync(PROFILES_FILE))  Object.assign(companyProfiles,  JSON.parse(fs.readFileSync(PROFILES_FILE,  'utf8')));
+    if (fs.existsSync(HISTORY_FILE))   Object.assign(invoiceHistory,   JSON.parse(fs.readFileSync(HISTORY_FILE,   'utf8')));
+    if (fs.existsSync(COUNTER_FILE))   Object.assign(invoiceCounters,  JSON.parse(fs.readFileSync(COUNTER_FILE,   'utf8')));
+    if (fs.existsSync(GOALS_FILE))     Object.assign(revenueGoals,     JSON.parse(fs.readFileSync(GOALS_FILE,     'utf8')));
+    if (fs.existsSync(TEMPLATES_FILE)) Object.assign(invoiceTemplates, JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8')));
+    if (fs.existsSync(EXPENSES_FILE))  Object.assign(expenseHistory,   JSON.parse(fs.readFileSync(EXPENSES_FILE,  'utf8')));
+    // v2.2 files
+    if (fs.existsSync(CATALOGUE_FILE)) Object.assign(servicesCatalogue, JSON.parse(fs.readFileSync(CATALOGUE_FILE, 'utf8')));
+    if (fs.existsSync(QUOTES_FILE))    Object.assign(quoteHistory,      JSON.parse(fs.readFileSync(QUOTES_FILE,   'utf8')));
+    if (fs.existsSync(CLIENTS_FILE))   Object.assign(clientDirectory,   JSON.parse(fs.readFileSync(CLIENTS_FILE,  'utf8')));
+    if (fs.existsSync(RECURRING_FILE)) Object.assign(recurringInvoices, JSON.parse(fs.readFileSync(RECURRING_FILE,'utf8')));
+    if (fs.existsSync(CREDITS_FILE))   Object.assign(creditNotes,       JSON.parse(fs.readFileSync(CREDITS_FILE,  'utf8')));
+    if (fs.existsSync(BRANDING_FILE))  Object.assign(brandingSettings,  JSON.parse(fs.readFileSync(BRANDING_FILE, 'utf8')));
   } catch (err) { console.error('Load error:', err.message); }
 }
 
@@ -109,6 +133,13 @@ function saveData() {
     fs.writeFileSync(GOALS_FILE,     JSON.stringify(revenueGoals,     null, 2));
     fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(invoiceTemplates, null, 2));
     fs.writeFileSync(EXPENSES_FILE,  JSON.stringify(expenseHistory,   null, 2));
+    // v2.2 files
+    fs.writeFileSync(CATALOGUE_FILE, JSON.stringify(servicesCatalogue, null, 2));
+    fs.writeFileSync(QUOTES_FILE,    JSON.stringify(quoteHistory,      null, 2));
+    fs.writeFileSync(CLIENTS_FILE,   JSON.stringify(clientDirectory,   null, 2));
+    fs.writeFileSync(RECURRING_FILE, JSON.stringify(recurringInvoices, null, 2));
+    fs.writeFileSync(CREDITS_FILE,   JSON.stringify(creditNotes,       null, 2));
+    fs.writeFileSync(BRANDING_FILE,  JSON.stringify(brandingSettings,  null, 2));
   } catch (err) { console.error('Save error:', err.message); }
 }
 
@@ -348,10 +379,11 @@ async function createPaymentLink(invoiceData) {
 }
 
 // ─── PDF Generation ───────────────────────────────────────────────────────────
-async function generateProfessionalInvoice(data) {
+async function generateProfessionalInvoice(data, branding = {}) {
   return new Promise(async (resolve, reject) => {
     const pdfPath = `/tmp/invoice_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`;
-    const doc     = new PDFDocument({ margin: 0, size: 'A4', info: { Title: `Invoice ${data.invoice_id}`, Author: data.company_name } });
+    const docTitle = data.doc_type === 'QUOTATION' ? `Quote ${data.invoice_id}` : data.doc_type === 'CREDIT NOTE' ? `Credit Note ${data.invoice_id}` : `Invoice ${data.invoice_id}`;
+    const doc     = new PDFDocument({ margin: 0, size: 'A4', info: { Title: docTitle, Author: data.company_name } });
     const stream  = fs.createWriteStream(pdfPath);
     doc.pipe(stream);
 
@@ -362,8 +394,9 @@ async function generateProfessionalInvoice(data) {
 
     // ── Brand Colors ──────────────────────────────────────────────────────────
     const NAVY     = '#0F172A';    // Dark navy (header/footer)
-    const ACCENT   = '#6366F1';    // Indigo (brand accent)
-    const ACCENT2  = '#818CF8';    // Lighter indigo
+    // Support custom branding accent color
+    const ACCENT   = branding.accentColor || '#6366F1';    // Default indigo
+    const ACCENT2  = branding.accentColor || '#818CF8';    // Same or lighter
     const LIGHT_BG = '#F8FAFF';    // Near-white blue tint
     const BORDER   = '#E2E8F0';    // Subtle border color
     const MUTED    = '#64748B';    // Muted text
@@ -400,9 +433,10 @@ async function generateProfessionalInvoice(data) {
       doc.text(`TRN: ${data.trn}`, logoEndX, 56, { width: 260 });
     }
 
-    // INVOICE label (right side)
-    doc.fillColor(ACCENT2).font('Helvetica-Bold').fontSize(28)
-       .text('INVOICE', 340, 18, { align: 'right', width: W - 340 - MARGIN });
+    // INVOICE / QUOTATION / CREDIT NOTE label (right side)
+    const docTypeLabel = data.doc_type || 'INVOICE';
+    doc.fillColor(ACCENT2).font('Helvetica-Bold').fontSize(docTypeLabel.length > 7 ? 20 : 28)
+       .text(docTypeLabel, 340, 18, { align: 'right', width: W - 340 - MARGIN });
 
     // Invoice ID & date under label
     doc.font('Helvetica').fontSize(8).fillColor(WHITE)
@@ -568,10 +602,21 @@ async function generateProfessionalInvoice(data) {
       y += 66;
     }
 
+    // ── Thank-You Message (custom branding) ───────────────────────────────────
+    if (branding.thankYouMessage) {
+      if (y > 730) { doc.addPage({ margin: 0, size: 'A4' }); y = 40; }
+      doc.roundedRect(MARGIN, y, INNER_W, 42, 8).fill(LIGHT_BG);
+      doc.rect(MARGIN, y, 4, 42).fill(ACCENT);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ACCENT)
+         .text(branding.thankYouMessage, MARGIN + 16, y + 13, { width: INNER_W - 32, align: 'center' });
+      y += 58;
+    }
+
     // ── Footer ────────────────────────────────────────────────────────────────
     doc.rect(0, H - 36, W, 36).fill(NAVY);
+    const footerNote = branding.footerNote ? ` · ${branding.footerNote}` : '';
     doc.font('Helvetica').fontSize(7.5).fillColor(ACCENT2)
-       .text(`Generated by InvoKash  ·  For record-keeping purposes only  ·  Not a legally certified tax document  ·  ${data.invoice_id}`,
+       .text(`Generated by InvoKash  ·  For record-keeping purposes only  ·  Not a legally certified tax document${footerNote}  ·  ${data.invoice_id}`,
              MARGIN, H - 22, { align: 'center', width: INNER_W });
 
     doc.end();
@@ -626,7 +671,8 @@ async function confirmInvoice(userId) {
     status: 'pending',
   };
 
-  const pdfPath = await generateProfessionalInvoice(fullData);
+  const branding = brandingSettings[userId] || {};
+  const pdfPath = await generateProfessionalInvoice(fullData, branding);
   const permanentPath = path.join(INVOICE_DIR, `${userId}_${invoiceId}.pdf`);
   fs.copyFileSync(pdfPath, permanentPath);
 
@@ -636,6 +682,7 @@ async function confirmInvoice(userId) {
     service: data.line_items.map(i => i.description).join(', '),
     total: total.toFixed(2), tax_amount: tax.toFixed(2),
     currency: profile.currency, date, file_path: permanentPath, status: 'pending',
+    payments: [], remaining: total.toFixed(2),
   };
   invoiceHistory[userId].push(record);
   saveData();
@@ -1000,6 +1047,525 @@ function calculateProfitLoss(userId, period) {
   return { revenue, expenses, profit, margin, byCategory, invoiceCount: invs.length, expenseCount: exps.length };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── v2.2 NEW FEATURES ────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Services / Products Catalogue ────────────────────────────────────────────
+function addService(userId, { name, description = '', defaultPrice, currency }) {
+  if (!servicesCatalogue[userId]) servicesCatalogue[userId] = [];
+  if (servicesCatalogue[userId].length >= 50) return { error: 'Catalogue full (max 50 services)' };
+  const existing = servicesCatalogue[userId].find(s => s.name.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    existing.description = description || existing.description;
+    existing.defaultPrice = defaultPrice;
+    existing.currency = currency;
+    saveData();
+    return { success: true, updated: true, service: existing };
+  }
+  const service = { id: `svc_${Date.now()}`, name, description, defaultPrice: parseFloat(defaultPrice) || 0, currency };
+  servicesCatalogue[userId].push(service);
+  saveData();
+  return { success: true, service };
+}
+
+function getServices(userId) {
+  return (servicesCatalogue[userId] || []).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function deleteService(userId, serviceId) {
+  if (!servicesCatalogue[userId]) return false;
+  const before = servicesCatalogue[userId].length;
+  servicesCatalogue[userId] = servicesCatalogue[userId].filter(s => s.id !== serviceId);
+  if (servicesCatalogue[userId].length < before) { saveData(); return true; }
+  return false;
+}
+
+// ─── Quotes ───────────────────────────────────────────────────────────────────
+function generateQuoteId(userId) {
+  const year = new Date().getFullYear();
+  if (!quoteCounters[userId]) quoteCounters[userId] = {};
+  const key = String(year);
+  quoteCounters[userId][key] = (quoteCounters[userId][key] || 0) + 1;
+  return `QUO-${year}-${String(quoteCounters[userId][key]).padStart(4, '0')}`;
+}
+
+async function createQuote(userId, invoiceData) {
+  const profile = companyProfiles[userId];
+  if (!profile) return { error: 'no_profile' };
+  if (!quoteHistory[userId]) quoteHistory[userId] = [];
+
+  const tc = getTaxConfig(profile);
+  const subtotal = invoiceData.line_items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+  const tax = tc.enabled ? subtotal * (tc.rate / 100) : 0;
+  const total = subtotal + tax;
+
+  const quoteId = generateQuoteId(userId);
+  const date = new Date().toLocaleDateString('en-GB');
+
+  const fullData = {
+    doc_type: 'QUOTATION',
+    customer_name: invoiceData.customer_name, address: invoiceData.address,
+    company_name: profile.company_name, company_address: profile.company_address,
+    trn: profile.trn, currency: profile.currency,
+    bank_name: profile.bank_name, iban: profile.iban, account_name: profile.account_name,
+    tax_enabled: tc.enabled, tax_rate: tc.rate, tax_type: tc.type,
+    logo_path: profile.logo_path, invoice_id: quoteId, date,
+    line_items: invoiceData.line_items,
+    subtotal: subtotal.toFixed(2), tax_amount: tax.toFixed(2), total: total.toFixed(2),
+    status: 'draft',
+  };
+
+  const branding = brandingSettings[userId] || {};
+  const pdfPath = await generateProfessionalInvoice(fullData, branding);
+
+  const record = {
+    quote_id: quoteId, customer_name: invoiceData.customer_name, date,
+    data: invoiceData, total: total.toFixed(2), currency: profile.currency,
+    status: 'draft', pdf_path: pdfPath, invoice_id: null,
+  };
+  quoteHistory[userId].push(record);
+  saveData();
+  return { success: true, quoteId, pdfPath, total: total.toFixed(2), customer: invoiceData.customer_name };
+}
+
+function getQuotes(userId) {
+  return (quoteHistory[userId] || []).slice().reverse();
+}
+
+async function convertQuoteToInvoice(userId, quoteId) {
+  const quotes = quoteHistory[userId] || [];
+  const quote = quotes.find(q => q.quote_id === quoteId);
+  if (!quote) return { error: 'Quote not found' };
+  if (quote.status === 'converted') return { error: 'Already converted' };
+
+  // Re-use processInvoiceText flow by setting pending manually
+  const profile = companyProfiles[userId];
+  const tc = getTaxConfig(profile);
+  const subtotal = quote.data.line_items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+  const tax = tc.enabled ? subtotal * (tc.rate / 100) : 0;
+  const total = subtotal + tax;
+  pendingInvoices[userId] = { data: quote.data, profile, subtotal, tax, total, tc };
+
+  const result = await confirmInvoice(userId);
+  if (result.success) {
+    quote.status = 'converted';
+    quote.invoice_id = result.invoiceId;
+    saveData();
+  }
+  return result;
+}
+
+// ─── Client Directory ──────────────────────────────────────────────────────────
+function normalizeClientName(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function saveClientWhatsApp(userId, customerName, phone) {
+  if (!clientDirectory[userId]) clientDirectory[userId] = {};
+  const key = normalizeClientName(customerName);
+  clientDirectory[userId][key] = { name: customerName, whatsapp: phone.replace(/[^+\d]/g, ''), email: '' };
+  saveData();
+  return true;
+}
+
+function getClientWhatsApp(userId, customerName) {
+  const dir = clientDirectory[userId] || {};
+  const key = normalizeClientName(customerName);
+  return (dir[key] || dir[Object.keys(dir).find(k => k.includes(normalizeClientName(customerName.split(' ')[0])) )] || {}).whatsapp || null;
+}
+
+function listClients(userId) {
+  return Object.values(clientDirectory[userId] || {}).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function deleteClient(userId, customerName) {
+  const key = normalizeClientName(customerName);
+  if (clientDirectory[userId] && clientDirectory[userId][key]) {
+    delete clientDirectory[userId][key];
+    saveData();
+    return true;
+  }
+  return false;
+}
+
+// ─── Recurring Invoices ────────────────────────────────────────────────────────
+function createRecurring(userId, templateData, frequency) {
+  if (!recurringInvoices[userId]) recurringInvoices[userId] = [];
+  const nextDue = new Date();
+  if (frequency === 'weekly')    nextDue.setDate(nextDue.getDate() + 7);
+  else if (frequency === 'monthly') nextDue.setMonth(nextDue.getMonth() + 1);
+  else if (frequency === 'quarterly') nextDue.setMonth(nextDue.getMonth() + 3);
+
+  const rec = {
+    id: `rec_${Date.now()}`,
+    name: `${templateData.customer_name} — ${templateData.line_items?.[0]?.description || 'Invoice'}`,
+    templateData,
+    frequency,
+    nextDue: nextDue.toLocaleDateString('en-GB'),
+    active: true,
+    lastRun: null,
+  };
+  recurringInvoices[userId].push(rec);
+  saveData();
+  return { success: true, recurring: rec };
+}
+
+function getRecurring(userId) {
+  return (recurringInvoices[userId] || []).filter(r => r.active);
+}
+
+function pauseRecurring(userId, recurringId) {
+  const recs = recurringInvoices[userId] || [];
+  const rec = recs.find(r => r.id === recurringId);
+  if (!rec) return false;
+  rec.active = !rec.active;
+  saveData();
+  return rec.active;
+}
+
+function deleteRecurring(userId, recurringId) {
+  if (!recurringInvoices[userId]) return false;
+  const before = recurringInvoices[userId].length;
+  recurringInvoices[userId] = recurringInvoices[userId].filter(r => r.id !== recurringId);
+  if (recurringInvoices[userId].length < before) { saveData(); return true; }
+  return false;
+}
+
+async function processRecurringInvoices(telegramNotifyFn, waSendFn) {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString('en-GB');
+
+  for (const [userId, recs] of Object.entries(recurringInvoices)) {
+    const activeRecs = (recs || []).filter(r => r.active);
+    for (const rec of activeRecs) {
+      // Parse DD/MM/YYYY
+      const parts = rec.nextDue.split('/');
+      const dueDate = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+      if (dueDate > today) continue; // Not due yet
+      if (rec.lastRun === todayStr) continue; // Already ran today
+
+      try {
+        // Generate the invoice
+        pendingInvoices[userId] = {
+          data: rec.templateData,
+          profile: companyProfiles[userId],
+          subtotal: rec.templateData.line_items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0),
+          tc: getTaxConfig(companyProfiles[userId]),
+        };
+        const pending = pendingInvoices[userId];
+        pending.tax = pending.tc.enabled ? pending.subtotal * (pending.tc.rate / 100) : 0;
+        pending.total = pending.subtotal + pending.tax;
+
+        const result = await confirmInvoice(userId);
+        rec.lastRun = todayStr;
+
+        // Advance nextDue
+        const next = new Date(dueDate);
+        if (rec.frequency === 'weekly')    next.setDate(next.getDate() + 7);
+        else if (rec.frequency === 'monthly')  next.setMonth(next.getMonth() + 1);
+        else if (rec.frequency === 'quarterly') next.setMonth(next.getMonth() + 3);
+        rec.nextDue = next.toLocaleDateString('en-GB');
+        saveData();
+
+        if (result.success) {
+          const msg = `🔄 *Recurring Invoice Auto-Generated*\n\n` +
+            `📋 \`${result.invoiceId}\`\n` +
+            `👤 ${result.customer}\n` +
+            `💰 ${formatAmount(result.total, result.currency)}\n\n` +
+            `_Next due: ${rec.nextDue}_`;
+
+          if (telegramNotifyFn && /^\d+$/.test(userId)) {
+            await telegramNotifyFn(userId, msg, {});
+          }
+          if (waSendFn && userId.startsWith('wa_')) {
+            await waSendFn(userId.replace('wa_', ''), msg.replace(/\*/g, '').replace(/`/g, ''));
+          }
+        }
+      } catch (err) {
+        console.error(`Recurring invoice error for ${userId}:`, err.message);
+      }
+    }
+  }
+}
+
+// ─── Partial Payments ──────────────────────────────────────────────────────────
+function recordPartialPayment(userId, invoiceId, amount, note = '') {
+  const invs = invoiceHistory[userId] || [];
+  const inv = invs.find(i => i.invoice_id === invoiceId);
+  if (!inv) return { error: 'Invoice not found' };
+  if (inv.status === 'paid') return { error: 'Already fully paid' };
+
+  if (!inv.payments) inv.payments = [];
+  const payment = {
+    payment_id: `pay_${Date.now()}`,
+    amount: parseFloat(amount).toFixed(2),
+    date: new Date().toLocaleDateString('en-GB'),
+    note,
+  };
+  inv.payments.push(payment);
+
+  const paid = inv.payments.reduce((s, p) => s + parseFloat(p.amount), 0);
+  const total = parseFloat(inv.total);
+  inv.remaining = Math.max(0, total - paid).toFixed(2);
+
+  if (parseFloat(inv.remaining) <= 0) {
+    inv.status = 'paid';
+    inv.remaining = '0.00';
+  } else {
+    inv.status = 'partial';
+  }
+  saveData();
+  return { success: true, payment, remaining: inv.remaining, status: inv.status };
+}
+
+function getInvoicePayments(userId, invoiceId) {
+  const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
+  return inv ? { payments: inv.payments || [], remaining: inv.remaining || inv.total, status: inv.status } : null;
+}
+
+// ─── VAT / Tax Report PDF ──────────────────────────────────────────────────────
+async function generateTaxReport(userId, quarter, year) {
+  const profile = companyProfiles[userId];
+  if (!profile) return null;
+
+  const quarters = {
+    1: { start: new Date(year, 0, 1), end: new Date(year, 3, 0), label: 'Q1 (Jan–Mar)' },
+    2: { start: new Date(year, 3, 1), end: new Date(year, 6, 0), label: 'Q2 (Apr–Jun)' },
+    3: { start: new Date(year, 6, 1), end: new Date(year, 9, 0), label: 'Q3 (Jul–Sep)' },
+    4: { start: new Date(year, 9, 1), end: new Date(year, 12, 0), label: 'Q4 (Oct–Dec)' },
+  };
+  const q = quarters[quarter];
+  if (!q) return null;
+
+  const invs = (invoiceHistory[userId] || []).filter(inv => {
+    const parts = (inv.date || '').split('/');
+    if (parts.length !== 3) return false;
+    const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    return d >= q.start && d <= q.end && parseFloat(inv.tax_amount || 0) > 0;
+  });
+
+  return new Promise((resolve, reject) => {
+    const pdfPath = `/tmp/taxreport_${userId}_${Date.now()}.pdf`;
+    const doc = new PDFDocument({ margin: 45, size: 'A4' });
+    const stream = fs.createWriteStream(pdfPath);
+    doc.pipe(stream);
+
+    const W = 595.28 - 90;
+    const NAVY = '#0F172A', ACCENT = '#6366F1', MUTED = '#64748B', LIGHT = '#F8FAFF', BORDER = '#E2E8F0';
+
+    // Header
+    doc.rect(0, 0, 595.28, 80).fill(NAVY);
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#FFFFFF').text('VAT / TAX REPORT', 45, 20);
+    doc.font('Helvetica').fontSize(10).fillColor(ACCENT).text(`${q.label} ${year}`, 45, 50);
+    doc.fillColor('#FFFFFF').text(`${profile.company_name}${profile.trn ? '  ·  TRN: ' + profile.trn : ''}`, 45, 64);
+
+    let y = 100;
+    doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(`Generated: ${new Date().toLocaleDateString('en-GB')}`, 45, y);
+    y += 24;
+
+    // Table header
+    const cols = [45, 145, 240, 360, 430, 500];
+    const headers = ['Invoice ID', 'Date', 'Customer', 'Subtotal', 'VAT', 'Total'];
+    doc.rect(45, y, W, 20).fill(NAVY);
+    headers.forEach((h, i) => {
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#FFFFFF').text(h, cols[i], y + 6, { width: (cols[i + 1] || 550) - cols[i] - 4 });
+    });
+    y += 20;
+
+    // Table rows
+    let totalSales = 0, totalVAT = 0;
+    invs.forEach((inv, idx) => {
+      if (y > 750) { doc.addPage(); y = 40; }
+      const bg = idx % 2 === 0 ? '#FFFFFF' : LIGHT;
+      doc.rect(45, y, W, 18).fill(bg);
+      const subtotal = (parseFloat(inv.total || 0) - parseFloat(inv.tax_amount || 0)).toFixed(2);
+      const rowData = [inv.invoice_id, inv.date, inv.customer_name, subtotal, parseFloat(inv.tax_amount || 0).toFixed(2), parseFloat(inv.total || 0).toFixed(2)];
+      rowData.forEach((v, i) => {
+        doc.font('Helvetica').fontSize(8).fillColor('#0F172A').text(String(v), cols[i], y + 5, { width: (cols[i + 1] || 550) - cols[i] - 4 });
+      });
+      totalSales += parseFloat(inv.total || 0);
+      totalVAT += parseFloat(inv.tax_amount || 0);
+      y += 18;
+    });
+
+    y += 16;
+    // Summary box
+    doc.roundedRect(350, y, W - 305, 60, 8).fill(LIGHT);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(MUTED).text('SUMMARY', 366, y + 10);
+    doc.font('Helvetica').fontSize(9).fillColor('#0F172A')
+       .text(`Total Sales: ${formatAmount(totalSales.toFixed(2), profile.currency)}`, 366, y + 28)
+       .text(`Total VAT Collected: ${formatAmount(totalVAT.toFixed(2), profile.currency)}`, 366, y + 44);
+
+    // Footer
+    doc.rect(0, 841.89 - 36, 595.28, 36).fill(NAVY);
+    doc.font('Helvetica').fontSize(7.5).fillColor(ACCENT)
+       .text('Generated by InvoKash  ·  For official filing, verify with your tax advisor  ·  Not a certified tax document',
+             45, 841.89 - 22, { align: 'center', width: W });
+
+    doc.end();
+    stream.on('finish', () => resolve(pdfPath));
+    stream.on('error', reject);
+  });
+}
+
+// ─── Cash Flow Forecast ────────────────────────────────────────────────────────
+async function generateCashFlowForecast(userId) {
+  const profile = companyProfiles[userId];
+  if (!profile) return null;
+
+  const currency = profile.currency;
+  const all = invoiceHistory[userId] || [];
+  const now = new Date();
+
+  // Outstanding unpaid invoices
+  const unpaid = all.filter(i => i.status !== 'paid');
+  const unpaidTotal = unpaid.reduce((s, i) => s + parseFloat(i.remaining || i.total || 0), 0);
+
+  // Recurring expected income (next 90 days)
+  const recs = (recurringInvoices[userId] || []).filter(r => r.active);
+  let recurring30 = 0, recurring60 = 0, recurring90 = 0;
+  recs.forEach(r => {
+    const parts = r.nextDue.split('/');
+    const next = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    const days = Math.floor((next - now) / 86400000);
+    const amt = r.templateData.line_items?.reduce((s, i) => s + parseFloat(i.amount || 0), 0) || 0;
+    if (days <= 30)  recurring30 += amt;
+    if (days <= 60)  recurring60 += amt;
+    if (days <= 90)  recurring90 += amt;
+  });
+
+  // Historical monthly average (last 6 months)
+  const sixMonthsAgo = new Date(); sixMonthsAgo.setMonth(now.getMonth() - 6);
+  const recentInvs = all.filter(i => {
+    const parts = (i.date || '').split('/');
+    if (parts.length < 3) return false;
+    const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    return d >= sixMonthsAgo && i.status === 'paid';
+  });
+  const monthlyAvg = recentInvs.length > 0
+    ? recentInvs.reduce((s, i) => s + parseFloat(i.total || 0), 0) / 6
+    : 0;
+
+  const overdue = all.filter(i => {
+    if (i.status === 'paid') return false;
+    const parts = (i.date || '').split('/');
+    if (parts.length < 3) return false;
+    const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    return Math.floor((now - d) / 86400000) > 60;
+  });
+  const overdueRisk = overdue.reduce((s, i) => s + parseFloat(i.remaining || i.total || 0), 0);
+
+  const forecast30 = (monthlyAvg + recurring30).toFixed(2);
+  const forecast60 = (monthlyAvg * 2 + recurring60).toFixed(2);
+  const forecast90 = (monthlyAvg * 3 + recurring90).toFixed(2);
+
+  // AI insights
+  let aiInsight = '';
+  if (ANTHROPIC_API_KEY) {
+    try {
+      const prompt = `You are a financial advisor for a small business. Based on this data, give ONE concise actionable insight (max 2 sentences):
+- Monthly avg revenue (paid): ${formatAmount(monthlyAvg.toFixed(2), currency)}
+- Outstanding unpaid: ${formatAmount(unpaidTotal.toFixed(2), currency)} across ${unpaid.length} invoices
+- At-risk (60+ days overdue): ${formatAmount(overdueRisk.toFixed(2), currency)}
+- Recurring invoices active: ${recs.length}
+Focus on cash flow improvement or collection.`;
+      const res = await axios.post('https://api.anthropic.com/v1/messages', {
+        model: 'claude-haiku-4-5-20251001', max_tokens: 120,
+        messages: [{ role: 'user', content: prompt }],
+      }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } });
+      aiInsight = res.data.content[0].text.trim();
+    } catch (_) {}
+  }
+
+  return {
+    forecast30, forecast60, forecast90, currency,
+    unpaidTotal: unpaidTotal.toFixed(2), unpaidCount: unpaid.length,
+    overdueRisk: overdueRisk.toFixed(2), overdueCount: overdue.length,
+    recurringCount: recs.length, monthlyAvg: monthlyAvg.toFixed(2),
+    aiInsight,
+  };
+}
+
+// ─── Credit Notes ──────────────────────────────────────────────────────────────
+function generateCreditId(userId) {
+  const year = new Date().getFullYear();
+  if (!creditCounters[userId]) creditCounters[userId] = {};
+  const key = String(year);
+  creditCounters[userId][key] = (creditCounters[userId][key] || 0) + 1;
+  return `CN-${year}-${String(creditCounters[userId][key]).padStart(4, '0')}`;
+}
+
+async function createCreditNote(userId, originalInvoiceId, amount, reason) {
+  const profile = companyProfiles[userId];
+  if (!profile) return { error: 'no_profile' };
+  const originalInv = (invoiceHistory[userId] || []).find(i => i.invoice_id === originalInvoiceId);
+  if (!originalInv) return { error: 'Original invoice not found' };
+
+  const creditId = generateCreditId(userId);
+  const date = new Date().toLocaleDateString('en-GB');
+
+  const fullData = {
+    doc_type: 'CREDIT NOTE',
+    customer_name: originalInv.customer_name, address: '',
+    company_name: profile.company_name, company_address: profile.company_address,
+    trn: profile.trn, currency: originalInv.currency || profile.currency,
+    bank_name: profile.bank_name, iban: profile.iban, account_name: profile.account_name,
+    tax_enabled: false, tax_rate: 0, tax_type: 'VAT',
+    logo_path: profile.logo_path, invoice_id: creditId, date,
+    line_items: [{ description: `Credit for Invoice ${originalInvoiceId}: ${reason}`, amount: parseFloat(amount).toFixed(2) }],
+    subtotal: parseFloat(amount).toFixed(2), tax_amount: '0.00', total: parseFloat(amount).toFixed(2),
+    status: 'pending',
+    notes: `Original Invoice: ${originalInvoiceId}  ·  Reason: ${reason}`,
+  };
+
+  const branding = brandingSettings[userId] || {};
+  // Use red accent for credit notes
+  const creditBranding = { ...branding, accentColor: branding.accentColor || '#EF4444' };
+  const pdfPath = await generateProfessionalInvoice(fullData, creditBranding);
+
+  if (!creditNotes[userId]) creditNotes[userId] = [];
+  const record = {
+    credit_id: creditId, original_invoice_id: originalInvoiceId,
+    customer_name: originalInv.customer_name,
+    amount: parseFloat(amount).toFixed(2), reason, date,
+    currency: originalInv.currency || profile.currency,
+    pdf_path: pdfPath, status: 'issued',
+  };
+  creditNotes[userId].push(record);
+  saveData();
+  return { success: true, creditId, pdfPath, amount: parseFloat(amount).toFixed(2) };
+}
+
+function getCreditNotes(userId) {
+  return (creditNotes[userId] || []).slice().reverse();
+}
+
+// ─── Custom Branding ───────────────────────────────────────────────────────────
+const BRANDING_COLORS = {
+  indigo: { name: 'Indigo (Default)', hex: '#6366F1' },
+  blue:   { name: 'Blue',            hex: '#3B82F6' },
+  green:  { name: 'Green',           hex: '#10B981' },
+  gold:   { name: 'Gold',            hex: '#F59E0B' },
+  red:    { name: 'Red',             hex: '#EF4444' },
+  purple: { name: 'Purple',          hex: '#8B5CF6' },
+};
+
+function saveBranding(userId, settings) {
+  brandingSettings[userId] = { ...(brandingSettings[userId] || {}), ...settings };
+  saveData();
+  return brandingSettings[userId];
+}
+
+function getBranding(userId) {
+  return brandingSettings[userId] || {};
+}
+
+function resetBranding(userId) {
+  brandingSettings[userId] = {};
+  saveData();
+}
+
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 loadData();
 setInterval(saveData, 5 * 60 * 1000);
@@ -1010,8 +1576,10 @@ module.exports = {
   // State (shared, mutable references)
   companyProfiles, invoiceHistory, onboardingState, commandState, pendingInvoices,
   revenueGoals, invoiceTemplates, expenseHistory,
+  // v2.2 state
+  servicesCatalogue, quoteHistory, clientDirectory, recurringInvoices, creditNotes, brandingSettings,
   // Constants
-  CURRENCIES, PERIOD_NAMES, LOGO_DIR, INVOICE_DIR, EXPENSE_CATEGORIES,
+  CURRENCIES, PERIOD_NAMES, LOGO_DIR, INVOICE_DIR, EXPENSE_CATEGORIES, BRANDING_COLORS,
   // Utils
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, generateInvoiceId,
@@ -1023,13 +1591,23 @@ module.exports = {
   // Business logic
   processInvoiceText, confirmInvoice, markInvoicePaid, calculateStats,
   buildDownloadZip,
-  // New features
+  // v2.1 features
   getLastInvoiceForCustomer,
   getAgingReport,
   setRevenueGoal, getRevenueGoal,
   generateClientStatement,
   saveTemplate, getTemplates, deleteTemplate,
   extractExpenseData, logExpense, getExpenses, calculateProfitLoss,
+  // v2.2 features
+  addService, getServices, deleteService,
+  createQuote, getQuotes, convertQuoteToInvoice,
+  saveClientWhatsApp, getClientWhatsApp, listClients, deleteClient,
+  createRecurring, getRecurring, pauseRecurring, deleteRecurring, processRecurringInvoices,
+  recordPartialPayment, getInvoicePayments,
+  generateTaxReport,
+  generateCashFlowForecast,
+  createCreditNote, getCreditNotes,
+  saveBranding, getBranding, resetBranding,
   // PDF & Payment
   generateProfessionalInvoice, createPaymentLink,
 };
