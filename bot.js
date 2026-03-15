@@ -481,7 +481,7 @@ async function showInvoices(chatId, userId) {
 
   const currency = companyProfiles[userId]?.currency || 'AED';
   const recent   = invs.slice(-10).reverse();
-  const unpaidCt = invs.filter(i => i.status !== 'paid').length;
+  const unpaidAll = invs.filter(i => i.status !== 'paid');
 
   // Helper: relative date
   const relDate = (dateStr) => {
@@ -497,28 +497,47 @@ async function showInvoices(chatId, userId) {
     return dateStr;
   };
 
-  let msg = `📋 *Invoices*`;
-  if (unpaidCt > 0) msg += `  ·  ⏳ ${unpaidCt} unpaid`;
-  msg += `\n\n`;
+  const recentUnpaid = recent.filter(i => i.status !== 'paid');
+  const recentPaid   = recent.filter(i => i.status === 'paid');
 
-  recent.forEach((inv, i) => {
-    const customer = inv.customer_name?.trim() || 'Unknown';
-    const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
-    const status   = inv.status === 'paid' ? '✅' : '⏳';
-    msg += `${status} *${customer}*  💰 *${amount}*\n`;
-    msg += `   \`${inv.invoice_id}\`  ·  ${relDate(inv.date)}\n\n`;
-  });
+  let msg = `📋 *Invoices*\n\n`;
 
-  if (invs.length > 10) msg += `_+${invs.length - 10} older invoices in download_\n`;
+  // ── Unpaid section ──────────────────────────────────────
+  if (recentUnpaid.length > 0) {
+    msg += `⏳ *Unpaid*`;
+    if (unpaidAll.length > recentUnpaid.length) msg += `  _(${unpaidAll.length} total)_`;
+    msg += `\n`;
+    recentUnpaid.forEach(inv => {
+      const customer = inv.customer_name?.trim() || 'Unknown';
+      const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
+      msg += `▸ *${customer}*  💰 *${amount}*\n`;
+      msg += `   \`${inv.invoice_id}\`  ·  ${relDate(inv.date)}\n`;
+    });
+    msg += `\n`;
+  }
 
-  // Mark-paid buttons for most recent unpaid
-  const unpaid = recent.filter(i => i.status !== 'paid').slice(0, 2);
+  // ── Paid section ────────────────────────────────────────
+  if (recentPaid.length > 0) {
+    msg += `✅ *Paid*\n`;
+    recentPaid.forEach(inv => {
+      const customer = inv.customer_name?.trim() || 'Unknown';
+      const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
+      msg += `▸ ${customer}  ${amount}\n`;
+      msg += `   \`${inv.invoice_id}\`  ·  ${relDate(inv.date)}\n`;
+    });
+  }
+
+  if (invs.length > 10) msg += `\n_+${invs.length - 10} older invoices in download_\n`;
+
+  // Mark-paid buttons for unpaid invoices
+  const unpaid = recentUnpaid.slice(0, 3);
   const keyboard = [];
   if (unpaid.length > 0) {
     unpaid.forEach(inv => {
-      const customer = inv.customer_name?.trim()?.split(' ')[0] || inv.invoice_id;
+      const customer = inv.customer_name?.trim() || inv.invoice_id;
+      const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
       keyboard.push([{
-        text: `✅ Mark Paid · ${customer}`,
+        text: `✅ ${customer} paid — ${amount}`,
         callback_data: `paid_${inv.invoice_id}`
       }]);
     });
