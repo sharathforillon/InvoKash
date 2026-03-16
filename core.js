@@ -646,7 +646,7 @@ async function processInvoiceText(userId, text) {
   const tax      = tc.enabled ? subtotal * (tc.rate / 100) : 0;
   const total    = subtotal + tax;
 
-  const pending = { data, profile, subtotal, tax, total, tc };
+  const pending = { data, profile, subtotal, tax, total, tc, originalText: text };
   pendingInvoices[userId] = pending;
   return { success: true, pending };
 }
