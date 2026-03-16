@@ -22,7 +22,7 @@ const {
   setRevenueGoal, getRevenueGoal,
   generateBusinessInsights, generateClientStatement,
   saveTemplate, getTemplates, deleteTemplate,
-  extractExpenseData, extractExpenseFromImage, logExpense, getExpenses, calculateProfitLoss,
+  extractExpenseData, extractExpenseFromImage, extractExpenseFromPDF, logExpense, getExpenses, calculateProfitLoss,
   // v2.2 features
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,
@@ -1656,6 +1656,89 @@ async function handleReceiptPhoto(chatId, userId, photos) {
   }
 }
 
+// ─── Receipt Document Handler (PDFs + images sent as files) ───────────────────
+async function handleReceiptDocument(chatId, userId, doc) {
+  if (!companyProfiles[userId]) {
+    return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  }
+
+  const mime      = doc.mime_type || '';
+  const isPDF     = mime === 'application/pdf';
+  const isImage   = mime.startsWith('image/');
+
+  if (!isPDF && !isImage) {
+    return send(chatId,
+      '⚠️ I can scan *PDF documents* and *images* (JPEG, PNG).\n\n' +
+      'Send a flight ticket, hotel booking, invoice, or any receipt PDF and I\'ll auto-log it as an expense.'
+    );
+  }
+
+  // Enforce a 20 MB file size cap (Telegram Bot API limit)
+  if (doc.file_size && doc.file_size > 20 * 1024 * 1024) {
+    return send(chatId, '⚠️ File is too large (max 20 MB). Try a smaller version.');
+  }
+
+  await send(chatId, isPDF ? '📄 _Reading document..._' : '📸 _Scanning image..._');
+
+  let receiptPath = null;
+  try {
+    const fileInfo = await bot.getFile(doc.file_id);
+    const fileUrl  = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+    const fileRes  = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    const fileBuf  = Buffer.from(fileRes.data);
+
+    // Determine file extension for storage
+    const extMap  = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+    const ext     = extMap[mime] || (isPDF ? '.pdf' : '.jpg');
+    const fname   = `receipt_${userId}_${Date.now()}${ext}`;
+    receiptPath   = path.join(RECEIPTS_DIR, fname);
+    fs.writeFileSync(receiptPath, fileBuf);
+
+    // Extract using appropriate method
+    const data     = isPDF ? await extractExpenseFromPDF(fileBuf) : await extractExpenseFromImage(fileBuf);
+    const profile  = companyProfiles[userId];
+    const currency = profile.currency;
+
+    if (!data.amount || parseFloat(data.amount) <= 0) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+      return send(chatId,
+        '⚠️ Couldn\'t find a total amount in this document.\n\n' +
+        'Try typing the expense instead:\n_"Flight to Dubai 850"_'
+      );
+    }
+
+    commandState[userId] = {
+      type:        'receipt_confirm',
+      expenseData: { ...data, receipt_path: receiptPath },
+    };
+
+    const typeLabel    = isPDF ? '📄 *Document Scanned*' : '📸 *Image Scanned*';
+    const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
+    const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const msg =
+      `${typeLabel}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `${merchantLine}` +
+      `📝 ${data.description}\n` +
+      `🏷 Category: *${data.category}*\n` +
+      `💰 *${formatAmount(data.amount, currency)}*\n` +
+      `${dateLine}\n` +
+      `_Looks right? File saved for tax records._`;
+
+    await send(chatId, msg, { reply_markup: { inline_keyboard: [
+      [{ text: '✅ Log Expense + Save File', callback_data: 'rcpt_confirm' }],
+      [{ text: '❌ Discard',                 callback_data: 'rcpt_cancel'  }],
+    ]}});
+  } catch (err) {
+    console.error('Document scan error:', err.message);
+    if (receiptPath) { try { fs.unlinkSync(receiptPath); } catch (_) {} }
+    send(chatId,
+      '⚠️ Couldn\'t read this document. Try typing the expense instead:\n' +
+      '_"Flight to London 1200"_\n_"Hotel Marriott 600"_'
+    );
+  }
+}
+
 async function showExpenses(chatId, userId) {
   const profile = companyProfiles[userId];
   if (!profile) return send(chatId, '⚠️ Please set up your profile first.');
@@ -1669,7 +1752,8 @@ async function showExpenses(chatId, userId) {
       `No expenses logged yet.\n\n` +
       `*Log an expense:*\n` +
       `- Type: _"Spent 500 on petrol"_\n` +
-      `- Or send a 📸 photo of any receipt to auto-scan it`,
+      `- Send a 📸 photo of any receipt to auto-scan it\n` +
+      `- Send a 📄 PDF (flight ticket, hotel booking, invoice) to auto-log it`,
       { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
     );
   }
@@ -1699,7 +1783,7 @@ async function showExpenses(chatId, userId) {
   });
 
   if (expenses.length > 10) msg += `_+${expenses.length - 10} older expenses_\n`;
-  msg += `\n_Send a 📸 photo of any receipt to auto-scan it._`;
+  msg += `\n_Send a 📸 photo or 📄 PDF (tickets, invoices) to auto-scan._`;
 
   await send(chatId, msg, { reply_markup: { inline_keyboard: [
     [
@@ -2244,6 +2328,7 @@ function startTelegramBot() {
       if (text.startsWith('/')) { await handleCommand(chatId, userId, text, firstName); return; }
       if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
       if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo); return; }
+      if (msg.document && companyProfiles[userId]) { await handleReceiptDocument(chatId, userId, msg.document); return; }
       if (!companyProfiles[userId] && !onboardingState[userId]) { await showLanding(chatId, firstName); return; }
       if (msg.voice) { await handleVoiceMessage(chatId, userId, msg.voice, firstName); return; }
       if (onboardingState[userId]) { await handleOnboarding(chatId, userId, text); return; }

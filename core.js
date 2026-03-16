@@ -1019,6 +1019,34 @@ async function extractExpenseData(text) {
   return JSON.parse(raw);
 }
 
+async function extractExpenseFromPDF(pdfBuffer) {
+  const base64 = pdfBuffer.toString('base64');
+  const res = await axios.post('https://api.anthropic.com/v1/messages',
+    {
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages:   [{
+        role:    'user',
+        content: [
+          {
+            type:   'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
+          },
+          {
+            type: 'text',
+            text: `Look at this document (flight ticket, hotel booking, invoice, receipt, or bill) and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description (e.g. Flight to Dubai, Hotel Marriott 2 nights, Software license Adobe)",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "airline, hotel, company or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.`,
+          },
+        ],
+      }],
+    },
+    { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 30000 }
+  );
+  let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) raw = m[0];
+  return JSON.parse(raw);
+}
+
 async function extractExpenseFromImage(imageBuffer) {
   const base64 = imageBuffer.toString('base64');
   const res = await axios.post('https://api.anthropic.com/v1/messages',
@@ -1635,7 +1663,7 @@ module.exports = {
   setRevenueGoal, getRevenueGoal,
   generateClientStatement,
   saveTemplate, getTemplates, deleteTemplate,
-  extractExpenseData, extractExpenseFromImage, logExpense, getExpenses, calculateProfitLoss,
+  extractExpenseData, extractExpenseFromImage, extractExpenseFromPDF, logExpense, getExpenses, calculateProfitLoss,
   // v2.2 features
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,
