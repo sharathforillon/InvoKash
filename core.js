@@ -1,5 +1,5 @@
 /**
- * InvoKash Core — Shared Business Logic
+ * InvoKash Core - Shared Business Logic
  * Handles: data persistence, AI extraction, PDF generation, payments, stats
  * Used by: bot.js (Telegram) and whatsapp.js (WhatsApp)
  */
@@ -249,7 +249,7 @@ function generateCSV(invoices) {
 }
 
 // ─── AI: Intent Classification (with caching for cost savings) ────────────────
-// Simple regex pre-screen — avoids AI call entirely for obvious cases
+// Simple regex pre-screen - avoids AI call entirely for obvious cases
 function quickClassify(text) {
   const t = text.toLowerCase().trim();
   if (/^(hi|hello|hey|good (morning|evening|afternoon)|howdy|greetings|salaam|مرحبا)/i.test(t)) return 'greeting';
@@ -277,7 +277,7 @@ async function classifyIntent(text) {
       {
         model:      'claude-haiku-4-5-20251001',
         max_tokens: 10,
-        messages:   [{ role: 'user', content: `Classify this message as exactly ONE word — invoice, greeting, help, stats, download, invalid:\n"${text.slice(0, 200)}"\nAnswer:` }]
+        messages:   [{ role: 'user', content: `Classify this message as exactly ONE word - invoice, greeting, help, stats, download, invalid:\n"${text.slice(0, 200)}"\nAnswer:` }]
       },
       { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 10000 }
     );
@@ -349,7 +349,7 @@ async function createPaymentLink(invoiceData) {
   const stripe = getStripe();
   if (!stripe) return { success: false, error: 'Stripe not configured' };
   try {
-    // Stripe doesn't support all currencies for payment links — map unsupported ones
+    // Stripe doesn't support all currencies for payment links - map unsupported ones
     const stripeSupportedCurrencies = ['usd','eur','gbp','inr','cad','aud','sgd','aed','sar','qar','bhd','omr','kwd','egp'];
     const currency = invoiceData.currency.toLowerCase();
     if (!stripeSupportedCurrencies.includes(currency)) {
@@ -1199,7 +1199,7 @@ function createRecurring(userId, templateData, frequency) {
 
   const rec = {
     id: `rec_${Date.now()}`,
-    name: `${templateData.customer_name} — ${templateData.line_items?.[0]?.description || 'Invoice'}`,
+    name: `${templateData.customer_name} - ${templateData.line_items?.[0]?.description || 'Invoice'}`,
     templateData,
     frequency,
     nextDue: nextDue.toLocaleDateString('en-GB'),
