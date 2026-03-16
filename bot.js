@@ -41,6 +41,27 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 // Bot is initialized lazily in startTelegramBot()
 let bot;
 
+// ─── Persistent Quick-Action Keyboard ─────────────────────────────────────────
+// Two primary actions always pinned at the bottom of the Telegram chat.
+// Set once per user; Telegram keeps it visible until explicitly removed.
+const mainKbUsers = new Set();
+
+function ensureMainKeyboard(chatId, userId) {
+  if (mainKbUsers.has(userId)) return;
+  mainKbUsers.add(userId);
+  bot.sendMessage(chatId,
+    '📌 _Quick-action shortcuts pinned below - or just type anytime._',
+    {
+      parse_mode:   'Markdown',
+      reply_markup: {
+        keyboard:          [[{ text: '📄 New Invoice' }, { text: '💸 Log Expense' }]],
+        resize_keyboard:   true,
+        one_time_keyboard: false,
+      },
+    }
+  ).catch(() => {});
+}
+
 // ─── Onboarding Config ────────────────────────────────────────────────────────
 const ONBOARD_TOTAL = 10;
 
@@ -124,6 +145,47 @@ async function showLanding(chatId, firstName) {
   );
 }
 
+// ─── Primary Action Prompt Screens ────────────────────────────────────────────
+function showInvoicePrompt(chatId, userId) {
+  if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  send(chatId,
+    `📄 *Create Invoice*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Just describe what you\'re billing:\n\n` +
+    `_"Website design for Ahmed, 5,000"_\n` +
+    `_"3 months consulting for TechCorp, 2,500 each"_\n` +
+    `_"Logo design + branding for Acme, 3,200"_\n` +
+    `_"Invoice Rania 800 for photography"_\n\n` +
+    `Or send a 🎤 voice note - I\'ll transcribe it.\n\n` +
+    `_I\'ll extract the details, generate a PDF, and create a payment link._`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '📌 Use a Template', callback_data: 'nav_templates' }],
+      [{ text: '🏠 Home',           callback_data: 'nav_home'      }],
+    ]}}
+  );
+}
+
+function showExpensePrompt(chatId, userId) {
+  if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  send(chatId,
+    `💸 *Log Expense*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `*Type it:*\n` +
+    `_"Spent 250 on Adobe subscription"_\n` +
+    `_"Flight to Dubai 850"_\n` +
+    `_"Office supplies 120"_\n` +
+    `_"Paid 2,000 for subcontractor"_\n\n` +
+    `*Or send a file directly:*\n` +
+    `📸 Snap a receipt photo\n` +
+    `📄 Forward a PDF (flight ticket, hotel booking, invoice)\n\n` +
+    `_I\'ll auto-scan it and suggest the category._`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '💸 Recent Expenses', callback_data: 'nav_expenses' }],
+      [{ text: '🏠 Home',            callback_data: 'nav_home'     }],
+    ]}}
+  );
+}
+
 function showWelcome(chatId, userId, firstName = 'there') {
   const profile = companyProfiles[userId];
   const history = invoiceHistory[userId] || [];
@@ -190,9 +252,17 @@ function showWelcome(chatId, userId, firstName = 'there') {
     msg += `\n\n💬 _Type or 🎤 speak to create a new invoice_`;
   }
 
-  // Clean 3-tier navigation
+  // Pin the quick-action keyboard once per session
+  ensureMainKeyboard(chatId, userId);
+
+  // Home screen: primary actions first, then navigation
   send(chatId, msg, {
     reply_markup: { inline_keyboard: [
+      // Primary actions - always first
+      [
+        { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
+        { text: '💸 Log Expense',  callback_data: 'nav_log_expense' },
+      ],
       // Tier 1 - Most used daily
       [
         { text: '📋 Invoices',    callback_data: 'nav_invoices'  },
@@ -650,13 +720,16 @@ function handleMarkPaid(chatId, userId, invoiceId, queryId) {
       `💰 *Ka-ching! ${customer} paid.*\n\n` +
       `${amount ? `*${amount}* landed in your account ✅` : `${invoiceId} marked paid ✅`}\n\n` +
       `📅 You've collected *${formatAmount(monthPaid, currency)}* this month so far.\n\n` +
-      `_Type or 🎤 speak to create your next invoice._`,
+      `_Any project expenses to log against this payment?_`,
       { reply_markup: { inline_keyboard: [
         [
-          { text: '📋 Invoices', callback_data: 'nav_invoices' },
-          { text: '📊 Stats',    callback_data: 'nav_stats'    },
+          { text: '💸 Log Expense',  callback_data: 'nav_log_expense' },
+          { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
         ],
-        [{ text: '🏠 Home',      callback_data: 'nav_home'     }]
+        [
+          { text: '📋 Invoices', callback_data: 'nav_invoices' },
+          { text: '🏠 Home',     callback_data: 'nav_home'     },
+        ],
       ]}}
     );
   } else {
@@ -930,6 +1003,10 @@ async function handleVoiceMessage(chatId, userId, voice, firstName) {
 
 // ─── Text Message Router ──────────────────────────────────────────────────────
 async function handleTextMessage(chatId, userId, text, firstName) {
+  // ── Persistent keyboard button intercepts (exact match) ─────────────────────
+  if (text === '📄 New Invoice') return showInvoicePrompt(chatId, userId);
+  if (text === '💸 Log Expense') return showExpensePrompt(chatId, userId);
+
   const lower = text.toLowerCase();
 
   // Quick re-invoice: "bill [name] again" or "invoice [name] again"
@@ -2371,7 +2448,9 @@ function startTelegramBot() {
         delete pendingInvoices[userId];
         send(chatId, '🔄 Let\'s try again.\n\nDescribe your invoice:\n_"Plumbing for Ahmed at Marina for 500"_');
       }
-      else if (data === 'nav_home')          showWelcome(chatId, userId, firstName);
+      else if (data === 'nav_home')           showWelcome(chatId, userId, firstName);
+      else if (data === 'nav_new_invoice')   showInvoicePrompt(chatId, userId);
+      else if (data === 'nav_log_expense')   showExpensePrompt(chatId, userId);
       else if (data === 'nav_invoices')      showInvoices(chatId, userId);
       else if (data === 'nav_stats')         showPeriodSelector(chatId, userId, 'stats');
       else if (data === 'nav_profile')       showProfile(chatId, userId);
@@ -2412,10 +2491,19 @@ function startTelegramBot() {
           delete commandState[userId];
           const currency = companyProfiles[userId]?.currency || 'AED';
           send(chatId,
-            `✅ *Expense Logged!*\n\n📝 ${expense.description}\n🏷 ${expense.category}\n💰 *${formatAmount(expense.amount, currency)}*\n\n_Tap P&L to see your profit margin._`,
+            `✅ *Expense Logged!*\n\n` +
+            `📝 ${expense.description}\n` +
+            `🏷 ${expense.category}  ·  💰 *${formatAmount(expense.amount, currency)}*\n\n` +
+            `_Ready to bill a client?_`,
             { reply_markup: { inline_keyboard: [
-              [{ text: '📈 P&L Report', callback_data: 'nav_profit' }],
-              [{ text: '🏠 Home',       callback_data: 'nav_home'   }],
+              [
+                { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
+                { text: '💸 Log Another',  callback_data: 'nav_log_expense' },
+              ],
+              [
+                { text: '📈 P&L Report', callback_data: 'nav_profit' },
+                { text: '🏠 Home',       callback_data: 'nav_home'   },
+              ],
             ]}}
           );
         }
@@ -2430,17 +2518,23 @@ function startTelegramBot() {
           const expense  = logExpense(userId, state.expenseData);
           delete commandState[userId];
           const currency = companyProfiles[userId]?.currency || 'AED';
-          const merchantNote = expense.merchant ? `\n🏪 ${expense.merchant}` : '';
+          const merchantNote = expense.merchant ? `  ·  🏪 ${expense.merchant}` : '';
           send(chatId,
             `✅ *Expense Logged!*\n\n` +
             `📝 ${expense.description}${merchantNote}\n` +
             `🏷 ${expense.category}  ·  📅 ${expense.date}\n` +
             `💰 *${formatAmount(expense.amount, currency)}*\n\n` +
-            `📸 Receipt saved - export your data to get all receipts for tax filing.`,
+            `📸 Receipt saved for tax filing.\n\n` +
+            `_Ready to bill a client?_`,
             { reply_markup: { inline_keyboard: [
-              [{ text: '📈 P&L Report', callback_data: 'nav_profit'   }],
-              [{ text: '📥 Export All', callback_data: 'nav_download' }],
-              [{ text: '🏠 Home',       callback_data: 'nav_home'     }],
+              [
+                { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
+                { text: '💸 Log Another',  callback_data: 'nav_log_expense' },
+              ],
+              [
+                { text: '📥 Export All', callback_data: 'nav_download' },
+                { text: '🏠 Home',       callback_data: 'nav_home'     },
+              ],
             ]}}
           );
         }
