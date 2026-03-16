@@ -993,10 +993,15 @@ async function handleVoiceMessage(chatId, userId, voice, firstName) {
 
   } catch (err) {
     console.error('Voice error:', err.message);
+    // Use the user's most recent invoice as the example, or a generic one
+    const lastInv    = (invoiceHistory[userId] || []).slice(-1)[0];
+    const voiceExample = lastInv
+      ? `_"${lastInv.service || lastInv.line_items?.[0]?.description || 'Services'} for ${lastInv.customer_name}, ${formatAmount(lastInv.total, lastInv.currency)}"_`
+      : `_"Consulting for Ahmed, 3,000"_`;
     send(chatId,
       `⚠️ *Voice note couldn't be processed*\n\n` +
       `Please type your invoice instead:\n` +
-      `_"Plumbing for Ahmed at Marina for 500"_`
+      `${voiceExample}`
     );
   }
 }
@@ -2445,8 +2450,34 @@ function startTelegramBot() {
       else if (data.startsWith('dl_'))       downloadInvoices(chatId, userId, data.replace('dl_', ''));
       else if (data === 'confirm_invoice')   handleConfirmInvoice(chatId, userId);
       else if (data === 'retry_invoice') {
+        const pending  = pendingInvoices[userId];
         delete pendingInvoices[userId];
-        send(chatId, '🔄 Let\'s try again.\n\nDescribe your invoice:\n_"Plumbing for Ahmed at Marina for 500"_');
+
+        // Reconstruct a natural example from what the user actually typed before
+        let contextHint = '';
+        if (pending?.data) {
+          const d        = pending.data;
+          const customer = d.customer_name || '';
+          const items    = d.line_items || [];
+          const currency = companyProfiles[userId]?.currency || 'AED';
+
+          if (items.length === 1) {
+            contextHint = `_"${items[0].description} for ${customer}, ${formatAmount(items[0].amount, currency)}"_`;
+          } else if (items.length > 1) {
+            const firstAmt  = parseFloat(items[0].amount) || 0;
+            const allSame   = items.every(i => Math.abs((parseFloat(i.amount) || 0) - firstAmt) < 0.01);
+            const coreDesc  = items[0].description.replace(/\s*\(.*?\)\s*$/, '').trim() || items[0].description;
+            contextHint = allSame
+              ? `_"${items.length}x ${coreDesc} for ${customer}, ${formatAmount(firstAmt, currency)} each"_`
+              : `_"${coreDesc} for ${customer}, ${items.length} items"_`;
+          }
+        }
+
+        const prompt = contextHint
+          ? `✏️ *Edit Details*\n\nYour previous invoice:\n${contextHint}\n\nRetype with your corrections:`
+          : `✏️ *Edit Details*\n\nDescribe your invoice again:`;
+
+        send(chatId, prompt);
       }
       else if (data === 'nav_home')           showWelcome(chatId, userId, firstName);
       else if (data === 'nav_new_invoice')   showInvoicePrompt(chatId, userId);
