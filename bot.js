@@ -147,6 +147,7 @@ async function showLanding(chatId, firstName) {
 
 // ─── Primary Action Prompt Screens ────────────────────────────────────────────
 function showInvoicePrompt(chatId, userId) {
+  delete commandState[userId];
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
   send(chatId,
     `📄 *Create Invoice*\n` +
@@ -166,6 +167,7 @@ function showInvoicePrompt(chatId, userId) {
 }
 
 function showExpensePrompt(chatId, userId) {
+  delete commandState[userId];
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
   send(chatId,
     `💸 *Log Expense*\n` +
@@ -187,6 +189,7 @@ function showExpensePrompt(chatId, userId) {
 }
 
 function showWelcome(chatId, userId, firstName = 'there') {
+  delete commandState[userId]; // Always reset on Home — universal escape hatch
   const profile = companyProfiles[userId];
   const history = invoiceHistory[userId] || [];
 
@@ -835,7 +838,8 @@ async function showPeriodSelector(chatId, userId, type) {
         { text: '📅 This Quarter', callback_data: `${prefix}this_quarter` },
         { text: '📅 This Year',    callback_data: `${prefix}this_year`    }
       ],
-      [{ text: '📅 All Time',      callback_data: `${prefix}all`          }]
+      [{ text: '📅 All Time',      callback_data: `${prefix}all`          }],
+      [{ text: '🏠 Home',          callback_data: 'nav_home'              }]
     ]}
   });
 }
@@ -1271,7 +1275,10 @@ async function handleCommandState(chatId, userId, text) {
     if (state.type === 'stats') showStats(chatId, userId, period);
     else downloadInvoices(chatId, userId, period);
   } else {
-    send(chatId, '⚠️ Please use the buttons, or type: "this month", "last month", "this quarter", "this year", or "all".');
+    // User typed something unrelated to a period — clear stuck state and
+    // route the message normally so invoice/expense creation works.
+    delete commandState[userId];
+    await handleTextMessage(chatId, userId, text, '');
   }
 }
 
@@ -2408,6 +2415,9 @@ function startTelegramBot() {
 
     try {
       if (text.startsWith('/')) { await handleCommand(chatId, userId, text, firstName); return; }
+      // Persistent keyboard shortcuts always escape any stuck state
+      if (text === '📄 New Invoice') { delete commandState[userId]; return showInvoicePrompt(chatId, userId); }
+      if (text === '💸 Log Expense') { delete commandState[userId]; return showExpensePrompt(chatId, userId); }
       if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
       if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo); return; }
       if (msg.document && companyProfiles[userId]) { await handleReceiptDocument(chatId, userId, msg.document); return; }
