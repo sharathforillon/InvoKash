@@ -623,37 +623,71 @@ function handleMarkPaid(chatId, userId, invoiceId, queryId) {
 function showCustomers(chatId, userId) {
   const invs = invoiceHistory[userId] || [];
   if (invs.length === 0) return send(chatId,
-    `👥 *No Customers Yet*\n\nCreate your first invoice to build your client directory!\n\n_"Consulting for John Smith for 1500"_`);
+    `👥 *No Clients Yet*\n\nCreate your first invoice to build your client directory!\n\n_"Consulting for John Smith for 1500"_`);
 
+  const currency = companyProfiles[userId]?.currency || 'AED';
   const customers = {};
+
   invs.forEach(inv => {
     const name = inv.customer_name?.trim();
     if (!name) return;
-    if (!customers[name]) customers[name] = { count: 0, total: 0, paid: 0, currency: inv.currency, last: inv.date };
+    if (!customers[name]) customers[name] = { count: 0, total: 0, paid: 0, currency: inv.currency || currency };
     customers[name].count++;
-    customers[name].total += parseFloat(inv.total) || 0;
-    if (inv.status === 'paid') customers[name].paid += parseFloat(inv.total) || 0;
-    customers[name].last = inv.date;
+    const total = parseFloat(inv.total) || 0;
+    customers[name].total += total;
+    if (inv.status === 'paid') {
+      customers[name].paid += total;
+    } else if (inv.remaining !== undefined) {
+      customers[name].paid += Math.max(0, total - parseFloat(inv.remaining));
+    }
   });
 
-  const sorted     = Object.entries(customers).sort((a, b) => b[1].total - a[1].total);
-  const maxRevenue = sorted[0]?.[1].total || 1;
-  const currency   = companyProfiles[userId]?.currency || 'AED';
+  const sorted         = Object.entries(customers).sort((a, b) => b[1].total - a[1].total);
+  const totalBilled    = sorted.reduce((s, [, d]) => s + d.total, 0);
+  const totalCollected = sorted.reduce((s, [, d]) => s + d.paid,  0);
+  const totalOwed      = totalBilled - totalCollected;
 
-  const totalRevenue = sorted.reduce((s, [,d]) => s + d.total, 0);
-  let msg = `👥 *Clients*  ·  ${sorted.length} total  ·  ${formatAmount(totalRevenue, currency)}\n\n`;
+  // Two groups: outstanding balance vs fully cleared
+  const outstanding = sorted
+    .filter(([, d]) => d.paid < d.total)
+    .sort((a, b) => (b[1].total - b[1].paid) - (a[1].total - a[1].paid));
+  const cleared = sorted.filter(([, d]) => d.paid >= d.total && d.total > 0);
 
-  const medals = ['🥇', '🥈', '🥉'];
-  sorted.slice(0, 10).forEach(([name, d], i) => {
-    const badge   = i < 3 ? medals[i] : `${i + 1}.`;
-    const paidPct = d.total > 0 ? Math.round((d.paid / d.total) * 100) : 0;
-    msg += `${badge} *${name}*  —  ${formatAmount(d.total, d.currency)}\n`;
-    msg += `   ${d.count} invoice${d.count !== 1 ? 's' : ''}`;
-    if (d.paid > 0) msg += `  ·  ✅ ${paidPct}% paid`;
-    msg += `\n\n`;
-  });
+  // ── Portfolio summary ────────────────────────────────────────────────────────
+  let msg = `👥 *Client Overview*  ·  ${sorted.length} clients\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━\n`;
+  msg += `📋 Billed        *${formatAmount(totalBilled, currency)}*\n`;
+  msg += `✅ Collected     *${formatAmount(totalCollected, currency)}*\n`;
+  if (totalOwed > 0.009) {
+    msg += `🔴 Outstanding   *${formatAmount(totalOwed, currency)}*\n`;
+  } else {
+    msg += `🎉 All invoices cleared!\n`;
+  }
 
-  if (sorted.length > 10) msg += `_+${sorted.length - 10} more clients in download_\n`;
+  // ── Clients with outstanding balance ─────────────────────────────────────────
+  if (outstanding.length > 0) {
+    msg += `\n*NEEDS ATTENTION  (${outstanding.length})*\n`;
+    outstanding.forEach(([name, d]) => {
+      const owed    = d.total - d.paid;
+      const paidPct = Math.round((d.paid / d.total) * 100);
+      const icon    = paidPct === 0 ? '⚫' : paidPct < 50 ? '🔴' : '🟡';
+      msg += `\n${icon} *${name}*\n`;
+      msg += `   💸 *${formatAmount(owed, d.currency)}* outstanding\n`;
+      msg += `   ${formatAmount(d.total, d.currency)} billed  ·  ${d.count} inv`;
+      if (d.paid > 0) msg += `  ·  ${paidPct}% paid`;
+      msg += `\n`;
+    });
+  }
+
+  // ── Fully paid clients ───────────────────────────────────────────────────────
+  if (cleared.length > 0) {
+    msg += `\n*ALL CLEAR  (${cleared.length})*\n`;
+    cleared.forEach(([name, d]) => {
+      msg += `✅ *${name}*  —  ${formatAmount(d.total, d.currency)}  ·  ${d.count} inv\n`;
+    });
+  }
+
+  if (sorted.length > 10) msg += `\n_+${sorted.length - 10} more clients in export_`;
 
   send(chatId, msg, { reply_markup: { inline_keyboard: [
     [
