@@ -323,13 +323,20 @@ Rules: customer_name = who is billed, amounts are numbers only (no currency symb
   let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
   const m = raw.match(/\{[\s\S]*\}/);
   if (m) raw = m[0];
-  return JSON.parse(raw);
+  try { return JSON.parse(raw); } catch { throw new Error('AI returned invalid JSON for invoice extraction'); }
 }
 
 function validateInvoiceData(data) {
   const errors = [];
   if (!data.customer_name?.trim())   errors.push('Customer name');
   if (!data.line_items?.length)      errors.push('Service description');
+  // Guard: filter out items with no description or zero/NaN amount
+  if (data.line_items) {
+    data.line_items = data.line_items
+      .filter(i => i.description?.trim())
+      .map(i => ({ ...i, amount: Math.max(0, parseFloat(i.amount) || 0) }));
+    if (!data.line_items.length) errors.push('Service description');
+  }
   const total = (data.line_items || []).reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
   if (total <= 0)                    errors.push('Amount greater than 0');
   return { valid: errors.length === 0, errors };
@@ -1016,7 +1023,7 @@ async function extractExpenseData(text) {
   let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
   const m = raw.match(/\{[\s\S]*\}/);
   if (m) raw = m[0];
-  return JSON.parse(raw);
+  try { return JSON.parse(raw); } catch { throw new Error('AI returned malformed JSON'); }
 }
 
 async function extractExpenseFromPDF(pdfBuffer) {
@@ -1044,11 +1051,19 @@ async function extractExpenseFromPDF(pdfBuffer) {
   let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
   const m = raw.match(/\{[\s\S]*\}/);
   if (m) raw = m[0];
-  return JSON.parse(raw);
+  try { return JSON.parse(raw); } catch { throw new Error('AI returned malformed JSON'); }
 }
 
-async function extractExpenseFromImage(imageBuffer) {
+async function extractExpenseFromImage(imageBuffer, mediaType) {
   const base64 = imageBuffer.toString('base64');
+  // Detect media type from buffer magic bytes if not provided
+  if (!mediaType) {
+    const sig = imageBuffer.slice(0, 4);
+    if (sig[0] === 0x89 && sig[1] === 0x50) mediaType = 'image/png';
+    else if (sig[0] === 0xff && sig[1] === 0xd8) mediaType = 'image/jpeg';
+    else if (sig.toString('ascii', 0, 4) === 'RIFF') mediaType = 'image/webp';
+    else mediaType = 'image/jpeg'; // safe default
+  }
   const res = await axios.post('https://api.anthropic.com/v1/messages',
     {
       model:      'claude-haiku-4-5-20251001',
@@ -1058,7 +1073,7 @@ async function extractExpenseFromImage(imageBuffer) {
         content: [
           {
             type:   'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
+            source: { type: 'base64', media_type: mediaType, data: base64 },
           },
           {
             type: 'text',
@@ -1072,7 +1087,7 @@ async function extractExpenseFromImage(imageBuffer) {
   let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
   const m = raw.match(/\{[\s\S]*\}/);
   if (m) raw = m[0];
-  return JSON.parse(raw);
+  try { return JSON.parse(raw); } catch { throw new Error('AI returned malformed JSON'); }
 }
 
 function logExpense(userId, data) {
@@ -1081,7 +1096,7 @@ function logExpense(userId, data) {
     id:          `EXP-${Date.now()}`,
     date:        data.date || new Date().toLocaleDateString('en-GB'),
     description: data.description,
-    amount:      parseFloat(data.amount).toFixed(2),
+    amount:      (Math.max(0, parseFloat(data.amount) || 0)).toFixed(2),
     category:    EXPENSE_CATEGORIES.includes(data.category) ? data.category : 'Other',
     currency:    companyProfiles[userId]?.currency || 'AED',
   };

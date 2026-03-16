@@ -680,7 +680,7 @@ async function showInvoices(chatId, userId) {
     unpaidForButtons.forEach(inv => {
       const customer = inv.customer_name?.trim() || 'Client';
       const amount   = formatAmount(parseFloat(inv.remaining || inv.total) || 0, inv.currency || currency);
-      const shortId  = inv.invoice_id.replace('INV-2026-', '#').replace('INV-', '#');
+      const shortId  = inv.invoice_id.replace(`INV-${new Date().getFullYear()}-`, '#').replace(/^INV-\d{4}-/, '#').replace('INV-', '#');
       // Full-width label button (shows context - tapping does nothing visible)
       keyboard.push([
         { text: `📄 ${customer} · ${amount} · ${shortId}`, callback_data: `noop_${inv.invoice_id}` }
@@ -1051,8 +1051,10 @@ async function handleTextMessage(chatId, userId, text, firstName) {
     if (period) return showStats(chatId, userId, period);
     return showPeriodSelector(chatId, userId, 'stats');
   }
-  if (/\b(invoice|bill)s?\b/i.test(lower) && !/for.*\d/.test(lower)) return showInvoices(chatId, userId);
-  if (/\b(customer|client)s?\b/i.test(lower) && !/for.*\d/.test(lower)) return showCustomers(chatId, userId);
+  // Only route to list views for explicit navigation requests - NOT on any text
+  // containing "invoice"/"bill" alone (that breaks multilingual voice/text input)
+  if (/\b(my\s+invoices?|show\s+invoices?|list\s+invoices?|invoice\s+(list|history|overview)|see\s+invoices?)\b/i.test(lower)) return showInvoices(chatId, userId);
+  if (/\b(my\s+clients?|show\s+clients?|list\s+clients?|my\s+customers?|show\s+customers?)\b/i.test(lower)) return showCustomers(chatId, userId);
   if (/\b(profile|settings?)\b/i.test(lower)) return showProfile(chatId, userId);
 
   // AI classification
@@ -1177,7 +1179,9 @@ async function handleCommandState(chatId, userId, text) {
   if (state.type === 'partial_payment') {
     const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
     if (isNaN(amount) || amount <= 0) {
-      return send(chatId, '⚠️ Please enter a valid amount, e.g. `500`.');
+      return send(chatId, '⚠️ Please enter a valid amount, e.g. `500`.',
+        { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'nav_invoices' }]] }}
+      );
     }
     const result = recordPartialPayment(userId, state.invoiceId, amount, '');
     if (result.error) return send(chatId, `⚠️ ${result.error}`);
@@ -1784,7 +1788,7 @@ async function handleReceiptDocument(chatId, userId, doc) {
     fs.writeFileSync(receiptPath, fileBuf);
 
     // Extract using appropriate method
-    const data     = isPDF ? await extractExpenseFromPDF(fileBuf) : await extractExpenseFromImage(fileBuf);
+    const data     = isPDF ? await extractExpenseFromPDF(fileBuf) : await extractExpenseFromImage(fileBuf, mime);
     const profile  = companyProfiles[userId];
     const currency = profile.currency;
 
@@ -2419,7 +2423,9 @@ function startTelegramBot() {
       if (text === '📄 New Invoice') { delete commandState[userId]; return showInvoicePrompt(chatId, userId); }
       if (text === '💸 Log Expense') { delete commandState[userId]; return showExpensePrompt(chatId, userId); }
       if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
+      if (msg.photo && onboardingState[userId]) return; // ignore photos during other onboarding steps
       if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo); return; }
+      if (msg.document && onboardingState[userId]) return; // ignore documents during onboarding
       if (msg.document && companyProfiles[userId]) { await handleReceiptDocument(chatId, userId, msg.document); return; }
       if (!companyProfiles[userId] && !onboardingState[userId]) { await showLanding(chatId, firstName); return; }
       if (msg.voice) { await handleVoiceMessage(chatId, userId, msg.voice, firstName); return; }
@@ -2487,7 +2493,7 @@ function startTelegramBot() {
       else if (data === 'nav_home')           showWelcome(chatId, userId, firstName);
       else if (data === 'nav_new_invoice')   showInvoicePrompt(chatId, userId);
       else if (data === 'nav_log_expense')   showExpensePrompt(chatId, userId);
-      else if (data === 'nav_invoices')      showInvoices(chatId, userId);
+      else if (data === 'nav_invoices')      { delete commandState[userId]; showInvoices(chatId, userId); }
       else if (data === 'nav_stats')         showPeriodSelector(chatId, userId, 'stats');
       else if (data === 'nav_profile')       showProfile(chatId, userId);
       else if (data === 'nav_download')      showPeriodSelector(chatId, userId, 'download');
