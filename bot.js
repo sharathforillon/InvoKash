@@ -1704,8 +1704,7 @@ async function handleAIInsights(chatId, userId, period) {
     `🤖 *AI Business Insights*\n` +
     `📅 ${PERIOD_NAMES[period] || period}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `${insight}\n\n` +
-    `_Powered by Claude AI_`;
+    `${insight}`;
 
   await send(chatId, msg, { reply_markup: { inline_keyboard: [
     [
