@@ -32,8 +32,9 @@ const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
 const HISTORY_FILE  = path.join(DATA_DIR, 'history.json');
 const COUNTER_FILE  = path.join(DATA_DIR, 'counters.json');
 const LOGO_DIR      = path.join(BASE_DIR, 'logos');
+const RECEIPTS_DIR  = path.join(BASE_DIR, 'receipts');
 
-[LOGO_DIR, INVOICE_DIR, DATA_DIR, '/tmp/voice'].forEach(dir => {
+[LOGO_DIR, INVOICE_DIR, DATA_DIR, RECEIPTS_DIR, '/tmp/voice'].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -737,7 +738,14 @@ async function buildDownloadZip(userId, period) {
     archive.file(csvPath, { name: 'summary.csv' });
     filtered.forEach(inv => {
       if (inv.file_path && fs.existsSync(inv.file_path)) {
-        archive.file(inv.file_path, { name: path.basename(inv.file_path) });
+        archive.file(inv.file_path, { name: `invoices/${path.basename(inv.file_path)}` });
+      }
+    });
+    // Include receipt images for easy tax filing
+    const userExpenses = expenseHistory[userId] || [];
+    userExpenses.forEach(exp => {
+      if (exp.receipt_path && fs.existsSync(exp.receipt_path)) {
+        archive.file(exp.receipt_path, { name: `receipts/${path.basename(exp.receipt_path)}` });
       }
     });
     archive.finalize();
@@ -1011,16 +1019,46 @@ async function extractExpenseData(text) {
   return JSON.parse(raw);
 }
 
+async function extractExpenseFromImage(imageBuffer) {
+  const base64 = imageBuffer.toString('base64');
+  const res = await axios.post('https://api.anthropic.com/v1/messages',
+    {
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages:   [{
+        role:    'user',
+        content: [
+          {
+            type:   'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
+          },
+          {
+            type: 'text',
+            text: `Look at this receipt or invoice image and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description of what was purchased",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "store or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible on the receipt, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.`,
+          },
+        ],
+      }],
+    },
+    { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 25000 }
+  );
+  let raw = res.data.content[0].text.replace(/```json\n?|\n?```/g, '').trim();
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) raw = m[0];
+  return JSON.parse(raw);
+}
+
 function logExpense(userId, data) {
   if (!expenseHistory[userId]) expenseHistory[userId] = [];
   const expense = {
     id:          `EXP-${Date.now()}`,
-    date:        new Date().toLocaleDateString('en-GB'),
+    date:        data.date || new Date().toLocaleDateString('en-GB'),
     description: data.description,
     amount:      parseFloat(data.amount).toFixed(2),
     category:    EXPENSE_CATEGORIES.includes(data.category) ? data.category : 'Other',
     currency:    companyProfiles[userId]?.currency || 'AED',
   };
+  if (data.receipt_path) expense.receipt_path = data.receipt_path;
+  if (data.merchant)     expense.merchant     = data.merchant;
   expenseHistory[userId].push(expense);
   saveData();
   return expense;
@@ -1579,7 +1617,7 @@ module.exports = {
   // v2.2 state
   servicesCatalogue, quoteHistory, clientDirectory, recurringInvoices, creditNotes, brandingSettings,
   // Constants
-  CURRENCIES, PERIOD_NAMES, LOGO_DIR, INVOICE_DIR, EXPENSE_CATEGORIES, BRANDING_COLORS,
+  CURRENCIES, PERIOD_NAMES, LOGO_DIR, INVOICE_DIR, RECEIPTS_DIR, EXPENSE_CATEGORIES, BRANDING_COLORS,
   // Utils
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, generateInvoiceId,
@@ -1597,7 +1635,7 @@ module.exports = {
   setRevenueGoal, getRevenueGoal,
   generateClientStatement,
   saveTemplate, getTemplates, deleteTemplate,
-  extractExpenseData, logExpense, getExpenses, calculateProfitLoss,
+  extractExpenseData, extractExpenseFromImage, logExpense, getExpenses, calculateProfitLoss,
   // v2.2 features
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,

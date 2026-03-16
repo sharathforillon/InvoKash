@@ -13,7 +13,7 @@ const {
   companyProfiles, invoiceHistory, onboardingState, commandState, pendingInvoices,
   revenueGoals, expenseHistory,
   servicesCatalogue, quoteHistory, clientDirectory, recurringInvoices, creditNotes, brandingSettings,
-  CURRENCIES, PERIOD_NAMES, LOGO_DIR, EXPENSE_CATEGORIES, BRANDING_COLORS,
+  CURRENCIES, PERIOD_NAMES, LOGO_DIR, RECEIPTS_DIR, EXPENSE_CATEGORIES, BRANDING_COLORS,
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, calculateStats,
   classifyIntent, transcribeAudio, processInvoiceText, confirmInvoice,
@@ -22,7 +22,7 @@ const {
   setRevenueGoal, getRevenueGoal,
   generateBusinessInsights, generateClientStatement,
   saveTemplate, getTemplates, deleteTemplate,
-  extractExpenseData, logExpense, getExpenses, calculateProfitLoss,
+  extractExpenseData, extractExpenseFromImage, logExpense, getExpenses, calculateProfitLoss,
   // v2.2 features
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,
@@ -1591,6 +1591,71 @@ async function handleExpenseEntry(chatId, userId, text) {
   }
 }
 
+// ─── Receipt Photo Handler ─────────────────────────────────────────────────────
+async function handleReceiptPhoto(chatId, userId, photos) {
+  if (!companyProfiles[userId]) {
+    return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  }
+  await send(chatId, '📸 _Scanning receipt..._');
+  let receiptPath = null;
+  try {
+    // Use the highest-resolution version of the photo
+    const fileId   = photos[photos.length - 1].file_id;
+    const fileInfo = await bot.getFile(fileId);
+    const fileUrl  = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+    const imgRes   = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 20000 });
+    const imgBuf   = Buffer.from(imgRes.data);
+
+    // Persist the image before AI processing
+    const receiptFilename = `receipt_${userId}_${Date.now()}.jpg`;
+    receiptPath = path.join(RECEIPTS_DIR, receiptFilename);
+    fs.writeFileSync(receiptPath, imgBuf);
+
+    // Extract expense data using Claude vision
+    const data     = await extractExpenseFromImage(imgBuf);
+    const profile  = companyProfiles[userId];
+    const currency = profile.currency;
+
+    if (!data.amount || parseFloat(data.amount) <= 0) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+      return send(chatId,
+        '⚠️ Couldn\'t read a total amount from this receipt.\n\n' +
+        'Try typing the expense instead:\n_"Spent 500 on petrol"_'
+      );
+    }
+
+    // Store state including saved receipt path
+    commandState[userId] = {
+      type:        'receipt_confirm',
+      expenseData: { ...data, receipt_path: receiptPath },
+    };
+
+    const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
+    const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const msg =
+      `📸 *Receipt Scanned*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `${merchantLine}` +
+      `📝 ${data.description}\n` +
+      `🏷 Category: *${data.category}*\n` +
+      `💰 *${formatAmount(data.amount, currency)}*\n` +
+      `${dateLine}\n` +
+      `_Looks right? Image saved for tax records._`;
+
+    await send(chatId, msg, { reply_markup: { inline_keyboard: [
+      [{ text: '✅ Log Expense + Save Receipt', callback_data: 'rcpt_confirm' }],
+      [{ text: '❌ Discard',                    callback_data: 'rcpt_cancel'  }],
+    ]}});
+  } catch (err) {
+    console.error('Receipt scan error:', err.message);
+    if (receiptPath) { try { fs.unlinkSync(receiptPath); } catch (_) {} }
+    send(chatId,
+      '⚠️ Couldn\'t read the receipt. Try typing the expense instead:\n' +
+      '_"Spent 300 on coffee"_\n_"Paid 1200 for software license"_'
+    );
+  }
+}
+
 async function showExpenses(chatId, userId) {
   const profile = companyProfiles[userId];
   if (!profile) return send(chatId, '⚠️ Please set up your profile first.');
@@ -1602,38 +1667,44 @@ async function showExpenses(chatId, userId) {
     return send(chatId,
       `💸 *Expense Tracker*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `No expenses logged yet.\n\n` +
-      `*Log an expense by typing:*\n` +
-      `_"Spent 500 on petrol"_\n` +
-      `_"Office supplies 200"_\n` +
-      `_"Paid 1500 for subcontractor"_`,
+      `*Log an expense:*\n` +
+      `- Type: _"Spent 500 on petrol"_\n` +
+      `- Or send a 📸 photo of any receipt to auto-scan it`,
       { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
     );
   }
 
-  const recent    = expenses.slice(-10).reverse();
-  const thisMonth = getExpenses(userId, 'this_month');
-  const monthTotal= thisMonth.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
-  const allTotal  = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const recent     = expenses.slice(-10).reverse();
+  const thisMonth  = getExpenses(userId, 'this_month');
+  const monthTotal = thisMonth.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const allTotal   = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const receiptCount = expenses.filter(e => e.receipt_path).length;
 
   let msg = `💸 *Expense Tracker*\n`;
   msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
   msg += `📅 This Month: *${formatAmount(monthTotal, currency)}*\n`;
-  msg += `📊 All Time: ${formatAmount(allTotal, currency)}\n\n`;
-  msg += `*Recent Expenses:*\n\n`;
+  msg += `📊 All Time: ${formatAmount(allTotal, currency)}\n`;
+  if (receiptCount > 0) {
+    msg += `📸 ${receiptCount} receipt${receiptCount > 1 ? 's' : ''} saved - export to get them all for tax filing\n`;
+  }
+  msg += `\n*Recent Expenses:*\n\n`;
 
   const catEmoji = { Travel: '✈️', Software: '💻', Office: '🏢', Marketing: '📣', Subcontractors: '👷', Equipment: '🔧', Other: '📦' };
   recent.forEach(exp => {
-    const icon = catEmoji[exp.category] || '📦';
-    msg += `${icon} *${formatAmount(exp.amount, exp.currency || currency)}* - ${exp.description}\n`;
-    msg += `   🏷 ${exp.category}  ·  📅 ${exp.date}\n\n`;
+    const icon         = catEmoji[exp.category] || '📦';
+    const receiptBadge = exp.receipt_path ? ' 📸' : '';
+    const merchantStr  = exp.merchant ? `  🏪 ${exp.merchant}  ·` : '';
+    msg += `${icon} *${formatAmount(exp.amount, exp.currency || currency)}* - ${exp.description}${receiptBadge}\n`;
+    msg += `  ${merchantStr} 🏷 ${exp.category}  ·  📅 ${exp.date}\n\n`;
   });
 
   if (expenses.length > 10) msg += `_+${expenses.length - 10} older expenses_\n`;
+  msg += `\n_Send a 📸 photo of any receipt to auto-scan it._`;
 
   await send(chatId, msg, { reply_markup: { inline_keyboard: [
     [
-      { text: '📈 P&L Report',   callback_data: 'nav_profit'  },
-      { text: '📊 Stats',        callback_data: 'nav_stats'   },
+      { text: '📈 P&L Report', callback_data: 'nav_profit'   },
+      { text: '📥 Export All', callback_data: 'nav_download' },
     ],
     [{ text: '🏠 Home', callback_data: 'nav_home' }]
   ]}});
@@ -2172,6 +2243,7 @@ function startTelegramBot() {
     try {
       if (text.startsWith('/')) { await handleCommand(chatId, userId, text, firstName); return; }
       if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
+      if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo); return; }
       if (!companyProfiles[userId] && !onboardingState[userId]) { await showLanding(chatId, firstName); return; }
       if (msg.voice) { await handleVoiceMessage(chatId, userId, msg.voice, firstName); return; }
       if (onboardingState[userId]) { await handleOnboarding(chatId, userId, text); return; }
@@ -2266,6 +2338,35 @@ function startTelegramBot() {
       else if (data === 'exp_cancel') {
         delete commandState[userId];
         send(chatId, '❌ Expense cancelled.');
+      }
+      else if (data === 'rcpt_confirm') {
+        const state = commandState[userId];
+        if (state?.type === 'receipt_confirm' && state.expenseData) {
+          const expense  = logExpense(userId, state.expenseData);
+          delete commandState[userId];
+          const currency = companyProfiles[userId]?.currency || 'AED';
+          const merchantNote = expense.merchant ? `\n🏪 ${expense.merchant}` : '';
+          send(chatId,
+            `✅ *Expense Logged!*\n\n` +
+            `📝 ${expense.description}${merchantNote}\n` +
+            `🏷 ${expense.category}  ·  📅 ${expense.date}\n` +
+            `💰 *${formatAmount(expense.amount, currency)}*\n\n` +
+            `📸 Receipt saved - export your data to get all receipts for tax filing.`,
+            { reply_markup: { inline_keyboard: [
+              [{ text: '📈 P&L Report', callback_data: 'nav_profit'   }],
+              [{ text: '📥 Export All', callback_data: 'nav_download' }],
+              [{ text: '🏠 Home',       callback_data: 'nav_home'     }],
+            ]}}
+          );
+        }
+      }
+      else if (data === 'rcpt_cancel') {
+        const state = commandState[userId];
+        if (state?.type === 'receipt_confirm' && state.expenseData?.receipt_path) {
+          try { fs.unlinkSync(state.expenseData.receipt_path); } catch (_) {}
+        }
+        delete commandState[userId];
+        send(chatId, '❌ Receipt discarded.');
       }
       else if (data === 'save_template') {
         const lastInv = (invoiceHistory[userId] || []).slice(-1)[0];
