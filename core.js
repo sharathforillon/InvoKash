@@ -186,7 +186,7 @@ function generateInvoiceId(userId) {
 }
 
 function asciiBar(value, max, width = 12) {
-  const filled = max > 0 ? Math.round((value / max) * width) : 0;
+  const filled = max > 0 ? Math.min(width, Math.max(0, Math.round((value / max) * width))) : 0;
   return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`;
 }
 
