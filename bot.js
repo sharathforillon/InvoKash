@@ -147,8 +147,8 @@ async function showLanding(chatId, firstName) {
 
 // ─── Primary Action Prompt Screens ────────────────────────────────────────────
 function showInvoicePrompt(chatId, userId) {
-  delete commandState[userId];
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  commandState[userId] = { type: 'expect_invoice' };
   send(chatId,
     `📄 *Create Invoice*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -167,8 +167,8 @@ function showInvoicePrompt(chatId, userId) {
 }
 
 function showExpensePrompt(chatId, userId) {
-  delete commandState[userId];
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
+  commandState[userId] = { type: 'expect_expense' };
   send(chatId,
     `💸 *Log Expense*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -1062,6 +1062,8 @@ async function handleTextMessage(chatId, userId, text, firstName) {
 
   if (intent === 'invoice') {
     await handleInvoiceRequest(chatId, userId, sanitizeInput(text));
+  } else if (intent === 'expense') {
+    await handleExpenseEntry(chatId, userId, sanitizeInput(text));
   } else if (intent === 'greeting' || intent === 'help') {
     showWelcome(chatId, userId, firstName);
   } else if (intent === 'stats') {
@@ -1070,10 +1072,10 @@ async function handleTextMessage(chatId, userId, text, firstName) {
     showPeriodSelector(chatId, userId, 'download');
   } else {
     send(chatId,
-      `❓ I\'m not sure what you mean.\n\n` +
-      `To create an invoice, try:\n` +
-      `_"Web design for Acme Corp for 3000"_\n\n` +
-      `Or use /help to see all commands.`
+      `❓ Not sure what you mean.\n\n` +
+      `📄 To invoice: _"Website for Ahmed, 5000"_\n` +
+      `💸 To log expense: _"Spent 300 on software"_\n\n` +
+      `Or tap the quick-action buttons below.`
     );
   }
 }
@@ -1082,6 +1084,18 @@ async function handleCommandState(chatId, userId, text) {
   const state = commandState[userId];
   if (!state) return;
   const lower = text.toLowerCase().trim();
+
+  // ── Context routing from prompt screens ─────────────────────────────────────
+  // After the expense/invoice prompt, ANY text the user types goes to the right handler.
+  // No magic trigger words needed — the prompt established the intent.
+  if (state.type === 'expect_expense') {
+    delete commandState[userId];
+    return handleExpenseEntry(chatId, userId, text);
+  }
+  if (state.type === 'expect_invoice') {
+    delete commandState[userId];
+    return handleInvoiceRequest(chatId, userId, text);
+  }
 
   // ── Revenue goal input ───────────────────────────────────────────────────────
   if (state.type === 'set_goal') {
