@@ -111,11 +111,12 @@ async function handleCommand(chatId, userId, command, firstName) {
 async function showLanding(chatId, firstName) {
   await send(chatId,
     `👋 *Hi ${firstName}! I'm InvoKash.*\n\n` +
-    `Create professional invoices in seconds — just type or speak.\n\n` +
-    `🎤 _"Plumbing for Ahmed at Marina for 500"_\n` +
-    `↳ PDF invoice + payment link, instantly\n\n` +
+    `Create professional invoices in seconds — just type or speak naturally.\n\n` +
+    `💬 _"Web design for Ahmed for 3,500"_\n` +
+    `🎤 Or send a voice message — works too!\n\n` +
+    `↳ Instant PDF · Payment link · Auto reminders\n\n` +
     `✅ 14 currencies · VAT/GST · Stats · Templates\n` +
-    `⏱ _Setup takes ~2 minutes_`,
+    `⏱ _Takes ~2 minutes to set up_`,
     { reply_markup: { inline_keyboard: [
       [{ text: '🚀 Set Up My Account', callback_data: 'cmd_setup' }],
       [{ text: '❓ How It Works',      callback_data: 'cmd_help'  }]
@@ -142,61 +143,79 @@ function showWelcome(chatId, userId, firstName = 'there') {
     : null;
   const trendIcon = trend === null ? '' : parseFloat(trend) >= 0 ? `📈 +${trend}%` : `📉 ${trend}%`;
 
-  let msg = `🏠 *${profile.company_name}*`;
-  msg += `  ${curr.flag || ''}${profile.currency}\n\n`;
+  // Urgency: count overdue unpaid invoices (older than 7 days)
+  const overdueCount = history.filter(inv => {
+    if (inv.status === 'paid') return false;
+    const parts = inv.date?.split('/');
+    if (!parts || parts.length < 3) return false;
+    const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    return Math.floor((Date.now() - d.getTime()) / 86400000) > 7;
+  }).length;
+
+  let msg = `🏠 *${profile.company_name}*  ${curr.flag || ''}${profile.currency}\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━\n`;
 
   if (history.length === 0) {
-    msg += `🌟 *Ready to create your first invoice!*\n\n`;
-    msg += `Just type or send a voice message:\n`;
-    msg += `_"Web design for Acme Corp for 3500"_`;
+    msg += `\n🌟 *Welcome! Create your first invoice.*\n\n`;
+    msg += `Just type or send a 🎤 voice message:\n`;
+    msg += `_"Web design for Acme Corp for 3,500"_\n\n`;
+    msg += `InvoKash will extract the details, generate a PDF, and create a payment link automatically.`;
   } else {
-    msg += `📊 *This Month*\n`;
+    msg += `\n📅 *${new Date().toLocaleString('en-US', { month: 'long' })}*\n`;
     msg += `💰 *${formatAmount(monthStats.total, profile.currency)}*`;
-    if (trendIcon) msg += `  ${trendIcon}`;
+    if (trendIcon) msg += `   ${trendIcon}`;
     msg += `\n`;
     msg += `📄 ${monthStats.count} invoice${monthStats.count !== 1 ? 's' : ''}`;
-    if (monthStats.unpaid > 0) msg += `  ·  ⏳ ${formatAmount(monthStats.unpaid, profile.currency)} unpaid`;
+    if (monthStats.unpaid > 0) msg += `  ·  ⏳ ${formatAmount(monthStats.unpaid, profile.currency)} awaiting payment`;
     msg += `\n`;
-    if (allStats.count > monthStats.count) msg += `_All time: ${formatAmount(allStats.total, profile.currency)} · ${allStats.count} invoices_\n`;
+    if (allStats.count > monthStats.count) {
+      msg += `_All time: ${formatAmount(allStats.total, profile.currency)} · ${allStats.count} invoices_\n`;
+    }
 
-    // Revenue goal progress
+    // Revenue goal
     const goal = getRevenueGoal(userId);
     if (goal && goal.monthly > 0) {
       const pct = Math.min(100, Math.round((monthStats.total / goal.monthly) * 100));
       const bar = asciiBar(monthStats.total, goal.monthly, 10);
-      msg += `\n🎯 ${bar} ${pct}%  _(${formatAmount(monthStats.total, profile.currency)} of ${formatAmount(goal.monthly, profile.currency)})_\n`;
+      const goalMsg = pct >= 100 ? `🏆 *Goal smashed!*` : `🎯 Goal`;
+      msg += `\n${goalMsg}  ${bar} ${pct}%\n`;
+      msg += `_${formatAmount(monthStats.total, profile.currency)} of ${formatAmount(goal.monthly, profile.currency)}_\n`;
     }
 
-    msg += `\n_Type or 🎤 voice message to create an invoice_`;
+    // Urgency banner
+    if (overdueCount > 0) {
+      msg += `\n🔴 *${overdueCount} overdue invoice${overdueCount > 1 ? 's' : ''} need attention* → Aging`;
+    }
+
+    msg += `\n\n💬 _Type or 🎤 speak to create a new invoice_`;
   }
 
+  // Clean 3-tier navigation
   send(chatId, msg, {
     reply_markup: { inline_keyboard: [
-      [{ text: '➕ New Invoice',   callback_data: 'nav_home'      }],
+      // Tier 1 — Most used daily
       [
-        { text: '📊 Stats',        callback_data: 'nav_stats'     },
-        { text: '📋 Invoices',     callback_data: 'nav_invoices'  },
+        { text: '📋 Invoices',    callback_data: 'nav_invoices'  },
+        { text: '👥 Clients',     callback_data: 'nav_customers' },
+      ],
+      // Tier 2 — Financial intelligence
+      [
+        { text: '📊 Stats',       callback_data: 'nav_stats'     },
+        { text: '📈 P&L',         callback_data: 'nav_profit'    },
       ],
       [
-        { text: '👥 Customers',    callback_data: 'nav_customers' },
-        { text: '⏱ Aging',        callback_data: 'nav_aging'     },
+        { text: '⏱ Aging',       callback_data: 'nav_aging'     },
+        { text: '🎯 Goal',        callback_data: 'nav_goal'      },
       ],
+      // Tier 3 — Tools
       [
-        { text: '📝 Quotes',      callback_data: 'nav_quotes'    },
+        { text: '📌 Templates',   callback_data: 'nav_templates' },
         { text: '🔄 Recurring',   callback_data: 'nav_recurring' },
       ],
       [
-        { text: '📈 P&L',         callback_data: 'nav_profit'    },
-        { text: '🔮 Forecast',    callback_data: 'nav_forecast'  },
+        { text: '👤 Profile',     callback_data: 'nav_profile'   },
+        { text: '📥 Export',      callback_data: 'nav_download'  },
       ],
-      [
-        { text: '📌 Templates',   callback_data: 'nav_templates' },
-        { text: '📦 Services',    callback_data: 'nav_services'  },
-      ],
-      [
-        { text: '👤 Profile',      callback_data: 'nav_profile'   },
-        { text: '📥 Download',     callback_data: 'nav_download'  },
-      ]
     ]}
   });
 }
@@ -204,26 +223,41 @@ function showWelcome(chatId, userId, firstName = 'there') {
 // ─── Help ─────────────────────────────────────────────────────────────────────
 function showHelp(chatId) {
   send(chatId,
-    `📖 *InvoKash Help*\n\n` +
-    `*Create an invoice — just type or 🎤 voice:*\n` +
-    `_"Web design for Acme for 3000"_\n` +
-    `_"Plumbing for Ahmed at Marina for 500"_\n\n` +
-    `*Quick commands:*\n` +
-    `/invoices · /stats · /customers · /download\n` +
-    `/aging · /goal · /expenses · /profit\n` +
-    `/templates · /statement · /profile · /setup\n` +
-    `/services · /quotes · /clients · /recurring\n` +
-    `/vat · /forecast · /credits · /branding\n\n` +
-    `💡 *Tips:*\n` +
-    `• Include: _name + service + amount_\n` +
-    `• Say "Bill Ahmed again" to re-invoice\n` +
-    `• Say "Spent 200 on software" to log expenses\n` +
-    `• Voice works in any language 🌍`,
+    `📖 *How InvoKash Works*\n\n` +
+
+    `*🧾 Create an Invoice*\n` +
+    `Just type naturally or send a 🎤 voice note:\n` +
+    `_"Web design for Ahmed for 3,000"_\n` +
+    `_"Plumbing at Marina for 500 for John Smith"_\n` +
+    `→ InvoKash extracts the details, generates a PDF, and creates a Stripe payment link automatically.\n\n` +
+
+    `*⚡ Power Shortcuts*\n` +
+    `• _"Bill Ahmed again"_ — re-send last invoice for that client\n` +
+    `• _"Spent 200 on software"_ — log a business expense\n` +
+    `• 🎤 Voice works in any language\n\n` +
+
+    `*📊 Track Your Money*\n` +
+    `📋 Invoices — all your invoices, mark paid here\n` +
+    `⏱ Aging — see what's overdue and by how long\n` +
+    `📊 Stats — revenue by period with trends\n` +
+    `📈 P&L — profit after expenses\n\n` +
+
+    `*🛠 Save Time*\n` +
+    `📌 Templates — one-tap invoicing for repeat work\n` +
+    `🔄 Recurring — auto-generate invoices on a schedule\n` +
+    `📝 Quotes — send a quote first, convert to invoice on approval\n\n` +
+
+    `*💡 Pro tip:* After your 3rd invoice, tap *💾 Save Template* to reuse it in one tap.`,
     { reply_markup: { inline_keyboard: [
       [
-        { text: '🏠 Home',    callback_data: 'nav_home'  },
-        { text: '⚙️ Setup',  callback_data: 'cmd_setup' },
-      ]
+        { text: '📋 Invoices',   callback_data: 'nav_invoices'  },
+        { text: '⏱ Aging',      callback_data: 'nav_aging'     },
+      ],
+      [
+        { text: '📌 Templates', callback_data: 'nav_templates' },
+        { text: '🔄 Recurring', callback_data: 'nav_recurring' },
+      ],
+      [{ text: '🏠 Home',       callback_data: 'nav_home'      }],
     ]}}
   );
 }
@@ -502,15 +536,15 @@ async function showInvoices(chatId, userId) {
   if (invs.length === 0) {
     return send(chatId,
       `📋 *No Invoices Yet*\n\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `Create your first invoice now!\n\n` +
-      `Just type:\n_"Consulting for John Smith for 1500"_\n\n` +
-      `Or send a 🎤 voice message`
+      `Create your first invoice — just type naturally:\n\n` +
+      `_"Consulting for John Smith for 1,500"_\n` +
+      `_"Web design for Acme Corp for 3,000"_\n\n` +
+      `Or send a 🎤 voice message. InvoKash does the rest.`
     );
   }
 
-  const currency = companyProfiles[userId]?.currency || 'AED';
-  const recent   = invs.slice(-10).reverse();
+  const currency  = companyProfiles[userId]?.currency || 'AED';
+  const recent    = invs.slice(-10).reverse();
   const unpaidAll = invs.filter(i => i.status !== 'paid');
 
   // Helper: relative date
@@ -518,70 +552,77 @@ async function showInvoices(chatId, userId) {
     if (!dateStr) return '';
     const parts = dateStr.split('/');
     if (parts.length < 3) return dateStr;
-    const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    const d    = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
     const days = Math.floor((Date.now() - d.getTime()) / 86400000);
     if (days === 0) return 'Today';
     if (days === 1) return 'Yesterday';
     if (days < 7)  return `${days}d ago`;
-    if (days < 30) return `${Math.floor(days/7)}w ago`;
+    if (days < 30) return `${Math.floor(days / 7)}w ago`;
     return dateStr;
   };
 
-  const recentUnpaid  = recent.filter(i => i.status !== 'paid');
-  const recentPartial = recent.filter(i => i.status === 'partial');
-  const recentPaid    = recent.filter(i => i.status === 'paid');
+  const recentUnpaid = recent.filter(i => i.status !== 'paid');
+  const recentPaid   = recent.filter(i => i.status === 'paid');
 
-  let msg = `📋 *Invoices*\n\n`;
+  let msg = `📋 *Invoices*\n`;
 
-  // ── Unpaid + Partial section ─────────────────────────────
+  // ── Awaiting payment ─────────────────────────────────────
   if (recentUnpaid.length > 0) {
-    msg += `⏳ *Unpaid*`;
-    if (unpaidAll.length > recentUnpaid.length) msg += `  _(${unpaidAll.length} total)_`;
-    msg += `\n`;
+    msg += `\n⏳ *Awaiting Payment`;
+    if (unpaidAll.length > recentUnpaid.length) msg += ` (${unpaidAll.length} total)`;
+    msg += `*\n`;
     recentUnpaid.forEach(inv => {
-      const customer = inv.customer_name?.trim() || 'Unknown';
-      const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
+      const customer  = inv.customer_name?.trim() || 'Unknown';
+      const amount    = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
+      const shortId   = inv.invoice_id.replace('INV-', '');
       if (inv.status === 'partial') {
         const remaining = formatAmount(parseFloat(inv.remaining) || 0, inv.currency || currency);
-        msg += `▸ *${customer}*  💛 Partial\n`;
-        msg += `   \`${inv.invoice_id}\`  ·  ${remaining} remaining  ·  ${relDate(inv.date)}\n`;
+        msg += `▸ *${customer}*  💛 Partial — *${remaining} left*\n`;
+        msg += `   #${shortId}  ·  ${amount} total  ·  ${relDate(inv.date)}\n`;
       } else {
         msg += `▸ *${customer}*  💰 *${amount}*\n`;
-        msg += `   \`${inv.invoice_id}\`  ·  ${relDate(inv.date)}\n`;
+        msg += `   #${shortId}  ·  ${relDate(inv.date)}\n`;
       }
     });
-    msg += `\n`;
   }
 
-  // ── Paid section ────────────────────────────────────────
+  // ── Collected ────────────────────────────────────────────
   if (recentPaid.length > 0) {
-    msg += `✅ *Paid*\n`;
+    msg += `\n✅ *Collected*\n`;
     recentPaid.forEach(inv => {
       const customer = inv.customer_name?.trim() || 'Unknown';
       const amount   = formatAmount(parseFloat(inv.total) || 0, inv.currency || currency);
-      msg += `▸ ${customer}  ${amount}\n`;
-      msg += `   \`${inv.invoice_id}\`  ·  ${relDate(inv.date)}\n`;
+      const shortId  = inv.invoice_id.replace('INV-', '');
+      msg += `▸ ${customer}  ${amount}  ·  #${shortId}  ·  ${relDate(inv.date)}\n`;
     });
   }
 
-  if (invs.length > 10) msg += `\n_+${invs.length - 10} older invoices in download_\n`;
+  if (invs.length > 10) msg += `\n_Showing 10 most recent · Download for full history_\n`;
 
-  // Mark-paid buttons for unpaid invoices (max 3)
-  const unpaid = recentUnpaid.slice(0, 3);
+  // ── Action buttons — invoice ref + amount baked into each button label ──────────
   const keyboard = [];
-  if (unpaid.length > 0) {
-    unpaid.forEach(inv => {
-      const customer = inv.customer_name?.trim() || inv.invoice_id;
+  const unpaidForButtons = recentUnpaid.slice(0, 3);
+
+  if (unpaidForButtons.length > 0) {
+    unpaidForButtons.forEach(inv => {
+      const customer = inv.customer_name?.trim() || 'Client';
       const amount   = formatAmount(parseFloat(inv.remaining || inv.total) || 0, inv.currency || currency);
+      const shortId  = inv.invoice_id.replace('INV-2026-', '#').replace('INV-', '#');
+      // Full-width label button (shows context — tapping does nothing visible)
       keyboard.push([
-        { text: `✅ ${customer.split(' ')[0]} paid full`, callback_data: `paid_${inv.invoice_id}` },
-        { text: `💰 Partial`,                            callback_data: `partial_${inv.invoice_id}` },
+        { text: `📄 ${customer} · ${amount} · ${shortId}`, callback_data: `noop_${inv.invoice_id}` }
+      ]);
+      // Action buttons below it — clearly linked by position
+      keyboard.push([
+        { text: `✅ Mark as Paid in Full`,  callback_data: `paid_${inv.invoice_id}`    },
+        { text: `💰 Record Part Payment`,   callback_data: `partial_${inv.invoice_id}` },
       ]);
     });
   }
+
   keyboard.push([
-    { text: '📥 Download',  callback_data: 'nav_download' },
-    { text: '📊 Stats',     callback_data: 'nav_stats'    }
+    { text: '📥 Export',  callback_data: 'nav_download' },
+    { text: '📊 Stats',   callback_data: 'nav_stats'    },
   ]);
   keyboard.push([{ text: '🏠 Home', callback_data: 'nav_home' }]);
 
@@ -590,32 +631,39 @@ async function showInvoices(chatId, userId) {
 
 // ─── Mark Invoice Paid ────────────────────────────────────────────────────────
 function handleMarkPaid(chatId, userId, invoiceId, queryId) {
-  // Acknowledge button press immediately (prevents loop & loading spinner)
   if (queryId) {
-    bot.answerCallbackQuery(queryId, { text: '✅ Marked as paid', show_alert: false }).catch(() => {});
+    bot.answerCallbackQuery(queryId, { text: '💰 Payment recorded!', show_alert: false }).catch(() => {});
   }
 
   const result = markInvoicePaid(userId, invoiceId);
   if (result) {
-    // Find the invoice for amount
-    const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
+    const inv      = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
     const customer = inv?.customer_name || 'Client';
     const amount   = inv ? formatAmount(inv.total, inv.currency) : '';
+
+    // Running month total for motivation
+    const currency    = companyProfiles[userId]?.currency || 'AED';
+    const thisMonth   = filterInvoicesByPeriod(invoiceHistory[userId] || [], 'this_month');
+    const monthPaid   = thisMonth.filter(i => i.status === 'paid').reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
+
     send(chatId,
-      `💰 *${customer} paid!*\n\n` +
-      `${amount ? `*${amount}* received` : invoiceId}\n` +
-      `\`${invoiceId}\` marked as paid ✅\n\n` +
-      `_Ready for the next invoice? Just type or 🎤 voice._`,
+      `💰 *Ka-ching! ${customer} paid.*\n\n` +
+      `${amount ? `*${amount}* landed in your account ✅` : `${invoiceId} marked paid ✅`}\n\n` +
+      `📅 You've collected *${formatAmount(monthPaid, currency)}* this month so far.\n\n` +
+      `_Type or 🎤 speak to create your next invoice._`,
       { reply_markup: { inline_keyboard: [
         [
-          { text: '📊 Stats',     callback_data: 'nav_stats'    },
-          { text: '📋 Invoices',  callback_data: 'nav_invoices' },
+          { text: '📋 Invoices', callback_data: 'nav_invoices' },
+          { text: '📊 Stats',    callback_data: 'nav_stats'    },
         ],
-        [{ text: '🏠 Home',       callback_data: 'nav_home'     }]
+        [{ text: '🏠 Home',      callback_data: 'nav_home'     }]
       ]}}
     );
   } else {
-    send(chatId, `⚠️ Invoice \`${invoiceId}\` not found.`);
+    send(chatId,
+      `⚠️ Invoice \`${invoiceId}\` not found.\n\n_Use 📋 Invoices to see your current invoice list._`,
+      { reply_markup: { inline_keyboard: [[{ text: '📋 Invoices', callback_data: 'nav_invoices' }]] }}
+    );
   }
 }
 
@@ -769,10 +817,10 @@ async function showStats(chatId, userId, period) {
   msg += `✅ ${formatAmount(stats.paid, currency)}  ·  ⏳ ${formatAmount(stats.unpaid, currency)}\n`;
 
   if (stats.topCustomers.length > 0) {
-    const medals = ['🥇', '🥈', '🥉', '4.', '5.'];
     msg += `\n*Top Clients*\n`;
     stats.topCustomers.forEach(([name, amt], i) => {
-      msg += `${medals[i]} ${name}  —  ${formatAmount(amt, currency)}\n`;
+      const bar = asciiBar(amt, stats.topCustomers[0][1] || 1, 6);
+      msg += `${i + 1}. *${name}*  ${bar}  ${formatAmount(amt, currency)}\n`;
     });
   }
 
@@ -867,10 +915,7 @@ async function handleVoiceMessage(chatId, userId, voice, firstName) {
     }
 
     transcribedText = sanitizeInput(transcribedText);
-    await send(chatId,
-      `🎤 *Heard you say:*\n_"${transcribedText}"_\n\n` +
-      `⚡ Extracting invoice details...`
-    );
+    await send(chatId, `🎤 _"${transcribedText}"_\n\n⚡ Building your invoice...`);
     await handleTextMessage(chatId, userId, transcribedText, firstName);
 
   } catch (err) {
@@ -1154,7 +1199,7 @@ async function handleInvoiceRequest(chatId, userId, text) {
     return send(chatId, '⚠️ Please set up your profile first with /setup before creating invoices.');
   }
 
-  await send(chatId, '⚡ Reading your invoice details...');
+  await send(chatId, '⚡ _Got it — extracting invoice details..._');
 
   const result = await processInvoiceText(userId, text);
 
@@ -1218,12 +1263,13 @@ async function handleConfirmInvoice(chatId, userId) {
     if (result.error) return send(chatId, '⚠️ Error generating invoice. Please try again.');
 
     let caption =
-      `✅ *${result.invoiceId}*\n` +
-      `👤 ${result.customer}  💰 *${formatAmount(result.total, result.currency)}*`;
+      `✅ *Invoice Created*  \`${result.invoiceId}\`\n` +
+      `👤 *${result.customer}*  ·  💰 *${formatAmount(result.total, result.currency)}*`;
     if (result.paymentUrl) {
-      caption += `\n\n💳 *Payment link:*\n${result.paymentUrl}`;
+      caption += `\n\n💳 *Payment link ready — share with client:*\n${result.paymentUrl}`;
+    } else {
+      caption += `\n\n_Forward the PDF above to your client._`;
     }
-    caption += `\n\n_Share the PDF above with your client._`;
 
     // Build WhatsApp send button if client has WhatsApp saved
     const clientPhone = getClientWhatsApp(userId, result.customer);
@@ -1351,17 +1397,26 @@ async function showGoalSetter(chatId, userId) {
   const thisMonth  = filterInvoicesByPeriod(invoiceHistory[userId] || [], 'this_month');
   const monthStats = calculateStats(thisMonth, currency);
 
-  let msg = `🎯 *Monthly Goal*\n\n`;
+  let msg = `🎯 *Monthly Revenue Goal*\n\n`;
 
   if (goal) {
     const pct = Math.min(100, Math.round((monthStats.total / goal.monthly) * 100));
     const bar = asciiBar(monthStats.total, goal.monthly, 12);
-    msg += `${bar} ${pct}%\n`;
-    msg += `${formatAmount(monthStats.total, currency)} of ${formatAmount(goal.monthly, currency)}\n`;
-    if (pct >= 100) msg += `🎉 *Goal reached this month!*\n`;
-    msg += `\n`;
+    if (pct >= 100) {
+      msg += `🏆 *Goal crushed!* You hit 100%!\n\n`;
+      msg += `${bar} ${pct}%\n`;
+      msg += `*${formatAmount(monthStats.total, currency)}* earned  ·  target was ${formatAmount(goal.monthly, currency)}\n\n`;
+      msg += `_Set a bigger goal for next month?_`;
+    } else {
+      const remaining = goal.monthly - monthStats.total;
+      msg += `${bar} *${pct}%*\n`;
+      msg += `*${formatAmount(monthStats.total, currency)}* of ${formatAmount(goal.monthly, currency)}\n`;
+      msg += `_${formatAmount(remaining, currency)} to go this month_\n\n`;
+      msg += `_Update target (type new amount, e.g. \`10000\`):_`;
+    }
+  } else {
+    msg += `No goal set yet.\n\n_What's your monthly revenue target?_\n_Type an amount, e.g. \`10000\`_`;
   }
-  msg += `_Type a new target amount (e.g. \`10000\`):_`;
 
   commandState[userId] = { type: 'set_goal' };
 
@@ -2165,7 +2220,7 @@ function startTelegramBot() {
       else if (data === 'nav_stats')         showPeriodSelector(chatId, userId, 'stats');
       else if (data === 'nav_profile')       showProfile(chatId, userId);
       else if (data === 'nav_download')      showPeriodSelector(chatId, userId, 'download');
-      else if (data === 'nav_customers')     showCustomers(chatId, userId);
+      else if (data === 'nav_customers')     showCustomers(chatId, userId); // "Clients" in UI
       else if (data === 'nav_aging')         showAgingDashboard(chatId, userId);
       else if (data === 'nav_goal')          showGoalSetter(chatId, userId);
       else if (data === 'nav_templates')     showTemplates(chatId, userId);
@@ -2219,6 +2274,7 @@ function startTelegramBot() {
         commandState[userId] = { type: 'template_name', lastInv };
         send(chatId, `📌 *Save as Template*\n\nGive this template a name:\n_e.g. "Monthly Retainer", "Web Design", "Consulting"_`);
       }
+      else if (data.startsWith('noop_'))      bot.answerCallbackQuery(query.id).catch(() => {});
       else if (data.startsWith('paid_'))     handleMarkPaid(chatId, userId, data.replace('paid_', ''), query.id);
       // v2.2 callbacks
       else if (data.startsWith('partial_'))  handlePartialPayment(chatId, userId, data.replace('partial_', ''), query.id);
