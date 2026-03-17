@@ -2515,68 +2515,68 @@ async function handleEmailSendInvoice(chatId, userId, invoiceId, queryId) {
   const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
   if (!inv) return send(chatId, '⚠️ Invoice not found.');
 
-  // Check SMTP is configured
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    return send(chatId,
-      `⚠️ *Email sending not configured.*\n\n` +
-      `Add the following to your \`.env\` file on the VPS:\n\n` +
-      `\`\`\`\nSMTP_HOST=smtp.gmail.com\nSMTP_PORT=587\nSMTP_USER=you@gmail.com\nSMTP_PASS=your_app_password\nSMTP_FROM=Your Business Name\n\`\`\`\n\n` +
-      `_See \`.env.example\` for full setup instructions (Gmail, Outlook, etc.)_`,
-      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
-    );
-  }
-
   const profile     = companyProfiles[userId];
   const clientEmail = getClientEmail(userId, inv.customer_name);
 
-  // If owner hasn't set their own email yet, ask for it first so they get CC'd
+  // ── Step 1: collect YOUR email first if missing ────────────────────────────
   if (!profile.owner_email) {
     commandState[userId] = { type: 'owner_email_then_send', invoiceId, customerName: inv.customer_name };
     return send(chatId,
-      `📧 *One quick thing — what's your business email?*\n\n` +
-      `You'll receive a copy (CC) of every invoice you email to clients.\n\n` +
-      `_e.g. ahmed@mybusiness.com_\n\n` +
-      `_You can also set this any time via /profile → Update Profile_`,
+      `📧 *Send Invoice by Email*\n\n` +
+      `First — what's *your* email address?\n` +
+      `_(You'll receive a copy of every invoice you send)_`,
       { reply_markup: { force_reply: true, selective: true,
           input_field_placeholder: 'e.g. you@yourbusiness.com' }}
     );
   }
 
-  if (clientEmail) {
-    await send(chatId, `📧 _Sending to ${inv.customer_name} at ${clientEmail}…_`);
-    try {
-      await sendInvoiceEmail(clientEmail, inv.customer_name, profile, inv, inv.file_path);
-
-      const ccLine = profile.owner_email ? `\n📬 CC'd to you at ${profile.owner_email}` : '';
-      await send(chatId,
-        `✅ *Invoice emailed to ${inv.customer_name}!*\n\n` +
-        `📧 ${clientEmail}${ccLine}\n` +
-        `_PDF attached${inv.payment_link ? ' + payment link included' : ''}._`,
-        { reply_markup: { inline_keyboard: [
-          [{ text: '📋 Invoices', callback_data: 'nav_invoices' }],
-          [{ text: '🏠 Home',     callback_data: 'nav_home'     }],
-        ]}}
-      );
-    } catch (err) {
-      console.error('Email send error:', err.message);
-      send(chatId,
-        `⚠️ *Couldn't email ${inv.customer_name}*\n\n_${err.message}_\n\n` +
-        `Check your SMTP settings in \`.env\` and try again.`,
-        { reply_markup: { inline_keyboard: [
-          [{ text: '📧 Try Again', callback_data: `email_send_${invoiceId}` }],
-          [{ text: '🏠 Home',      callback_data: 'nav_home'                }],
-        ]}}
-      );
-    }
-  } else {
-    // No client email on file — ask for it
+  // ── Step 2: collect CLIENT email if missing ────────────────────────────────
+  if (!clientEmail) {
     commandState[userId] = { type: 'email_send_address', invoiceId, customerName: inv.customer_name };
-    await send(chatId,
-      `📧 *Email Invoice to ${inv.customer_name}*\n\n` +
-      `What's their email address?\n\n` +
-      `_I'll save it for next time too!_`,
+    return send(chatId,
+      `📧 *Send Invoice by Email*\n\n` +
+      `What's *${inv.customer_name}'s* email address?\n\n` +
+      `_I'll save it for next time!_`,
       { reply_markup: { force_reply: true, selective: true,
-          input_field_placeholder: 'e.g. ahmed@company.com' }}
+          input_field_placeholder: 'e.g. client@company.com' }}
+    );
+  }
+
+  // ── Step 3: attempt send — SMTP check happens here, after emails collected ─
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    return send(chatId,
+      `📧 *Emails saved!*\n\n` +
+      `• To: \`${clientEmail}\`\n` +
+      `• CC: \`${profile.owner_email}\`\n\n` +
+      `⚠️ Email delivery isn't activated yet on this server.\n` +
+      `Add \`SMTP_HOST\`, \`SMTP_USER\`, and \`SMTP_PASS\` to the \`.env\` file and restart the bot.\n\n` +
+      `_See \`.env.example\` for Gmail / Outlook setup instructions._`,
+      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
+    );
+  }
+
+  await send(chatId, `📧 _Sending to ${inv.customer_name} at ${clientEmail}…_`);
+  try {
+    await sendInvoiceEmail(clientEmail, inv.customer_name, profile, inv, inv.file_path);
+
+    const ccLine = profile.owner_email ? `\n📬 CC'd to you at ${profile.owner_email}` : '';
+    await send(chatId,
+      `✅ *Invoice emailed to ${inv.customer_name}!*\n\n` +
+      `📧 ${clientEmail}${ccLine}\n` +
+      `_PDF attached${inv.payment_link ? ' + payment link included' : ''}._`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '📋 Invoices', callback_data: 'nav_invoices' }],
+        [{ text: '🏠 Home',     callback_data: 'nav_home'     }],
+      ]}}
+    );
+  } catch (err) {
+    console.error('Email send error:', err.message);
+    send(chatId,
+      `⚠️ *Couldn't send the email*\n\n_${err.message}_\n\nCheck your SMTP settings and try again.`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '📧 Try Again', callback_data: `email_send_${invoiceId}` }],
+        [{ text: '🏠 Home',      callback_data: 'nav_home'                }],
+      ]}}
     );
   }
 }
