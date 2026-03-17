@@ -899,7 +899,7 @@ async function buildDownloadZip(userId, period) {
   return { zipPath, filtered, stats, currency };
 }
 
-// ─── Expense Download Excel (images embedded — no zip needed) ─────────────────
+// ─── Expense Download — Excel (embedded images) + Receipts ZIP ────────────────
 async function buildExpenseZip(userId, period = 'all') {
   const allExpenses = expenseHistory[userId] || [];
   if (allExpenses.length === 0) return null;
@@ -913,15 +913,46 @@ async function buildExpenseZip(userId, period = 'all') {
 
   const sorted   = periodFiltered.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   const currency = companyProfiles[userId]?.currency || 'AED';
+  const ts       = Date.now();
 
-  // Generate Excel with embedded receipt images
+  // ── 1. Excel with embedded receipt images ───────────────────────────────────
   const xlsxPath = await generateExpenseExcel(sorted, currency);
 
+  // ── 2. Receipts ZIP — category subfolders, descriptive filenames ────────────
+  // Only built if at least one receipt file exists for this period
+  const receiptsWithFiles = sorted.filter(e => e.receipt_path && fs.existsSync(e.receipt_path));
+  let receiptsZipPath = null;
+
+  if (receiptsWithFiles.length > 0) {
+    receiptsZipPath = `/tmp/receipts_${userId}_${ts}.zip`;
+
+    await new Promise((resolve, reject) => {
+      const output  = fs.createWriteStream(receiptsZipPath);
+      const archive = archiver('zip', { zlib: { level: 7 } });
+      output.on('close', resolve);
+      archive.on('error', reject);
+      archive.pipe(output);
+
+      receiptsWithFiles.forEach(exp => {
+        const ext      = path.extname(exp.receipt_path);                     // e.g. .jpg
+        const category = (exp.category || 'Other').replace(/\s+/g, '_');     // e.g. Travel
+        // Friendly filename: DD-MM-YYYY_Description_slug.ext
+        const dateSlug = (exp.date || '').replace(/\//g, '-');               // 17-03-2026
+        const descSlug = (exp.description || 'receipt')
+          .toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+        const filename = `${dateSlug}_${descSlug}${ext}`;
+        archive.file(exp.receipt_path, { name: `${category}/${filename}` });
+      });
+
+      archive.finalize();
+    });
+  }
+
   const total        = sorted.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
-  const receiptCount = sorted.filter(e => e.receipt_path && fs.existsSync(e.receipt_path)).length;
+  const receiptCount = receiptsWithFiles.length;
   const periodName   = PERIOD_NAMES[period] || 'All Time';
-  // Keep key name as zipPath for backward compat with bot.js — points to xlsx now
-  return { zipPath: xlsxPath, count: sorted.length, total, receiptCount, currency, period, periodName };
+
+  return { xlsxPath, receiptsZipPath, count: sorted.length, total, receiptCount, currency, period, periodName };
 }
 
 // ─── Quick Re-Invoice ─────────────────────────────────────────────────────────

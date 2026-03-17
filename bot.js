@@ -1009,7 +1009,7 @@ function showExpenseDownloadPicker(chatId, userId) {
   );
 }
 
-// ─── Expense Export (Excel with embedded images) for a specific period ────────
+// ─── Expense Export — Excel + Receipts ZIP for a specific period ──────────────
 async function downloadExpenses(chatId, userId, period = 'all') {
   try {
     const result = await buildExpenseZip(userId, period);
@@ -1031,31 +1031,59 @@ async function downloadExpenses(chatId, userId, period = 'all') {
       );
     }
 
-    const { zipPath: xlsxPath, count, total, receiptCount: rc, currency, periodName } = result;
+    const { xlsxPath, receiptsZipPath, count, total, receiptCount: rc, currency, periodName } = result;
+    const periodSlug = periodName.replace(/\s+/g, '_');
 
-    await send(chatId, `⏳ _Building Excel report — ${count} expense${count !== 1 ? 's' : ''}${rc > 0 ? ` with ${rc} embedded receipt${rc > 1 ? 's' : ''}` : ''}…_`);
+    await send(chatId,
+      `⏳ _Sending ${count} expense${count !== 1 ? 's' : ''}${rc > 0 ? ` + ${rc} receipt${rc > 1 ? 's' : ''}` : ''}…_`
+    );
 
-    let caption = `📊 *Expense Report — ${periodName}*\n`;
-    caption += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    caption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  *${formatAmount(total, currency)}*\n`;
-    if (rc > 0) caption += `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} embedded in the Receipt column\n`;
-    caption += `\n*How to use with your accountant:*\n`;
-    caption += `1️⃣ Open in Excel, Numbers, or Google Sheets\n`;
-    caption += `2️⃣ Fill the *Tax Amount* column with input VAT/GST you can reclaim\n`;
-    caption += `3️⃣ Mark *Deductible* as NO for any personal items\n`;
-    if (rc > 0) caption += `4️⃣ Receipt images are embedded — scroll right to the Receipt column\n`;
-    caption += `\n_Each row has a unique Expense ID for audit trail._`;
+    // ── File 1: Excel spreadsheet ──────────────────────────────────────────────
+    let xlsxCaption = `📊 *Expense Report — ${periodName}*\n`;
+    xlsxCaption += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    xlsxCaption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  *${formatAmount(total, currency)}*\n`;
+    if (rc > 0) xlsxCaption += `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} embedded in the Receipt column\n`;
+    xlsxCaption += `\n*Accountant checklist:*\n`;
+    xlsxCaption += `1️⃣ Fill *Tax Amount* with input VAT/GST to reclaim\n`;
+    xlsxCaption += `2️⃣ Mark *Deductible* as NO for personal items\n`;
+    if (rc > 0) xlsxCaption += `3️⃣ Receipt images visible in the Receipt column\n`;
 
     await bot.sendDocument(chatId, xlsxPath, {
-      caption,
+      caption:    xlsxCaption,
       parse_mode: 'Markdown',
-      filename: `InvoKash_Expenses_${periodName.replace(/\s+/g, '_')}.xlsx`,
-      reply_markup: { inline_keyboard: [
-        [{ text: '📊 Download Another Period', callback_data: 'nav_export_expenses' }],
-        [{ text: '📋 All Expenses',            callback_data: 'nav_expenses'        }],
-      ]}
+      filename:   `InvoKash_Expenses_${periodSlug}.xlsx`,
     });
     try { fs.unlinkSync(xlsxPath); } catch (_) {}
+
+    // ── File 2: Receipts ZIP (only sent if receipts exist) ─────────────────────
+    if (receiptsZipPath) {
+      const zipCaption =
+        `📁 *Receipts — ${periodName}*\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} organised by category\n\n` +
+        `_Folders: Travel · Office · Software · Marketing · etc._\n` +
+        `_Filename: DD-MM-YYYY\\_description.ext for easy sorting_`;
+
+      await bot.sendDocument(chatId, receiptsZipPath, {
+        caption:    zipCaption,
+        parse_mode: 'Markdown',
+        filename:   `InvoKash_Receipts_${periodSlug}.zip`,
+        reply_markup: { inline_keyboard: [
+          [{ text: '📊 Download Another Period', callback_data: 'nav_export_expenses' }],
+          [{ text: '📋 All Expenses',            callback_data: 'nav_expenses'        }],
+        ]},
+      });
+      try { fs.unlinkSync(receiptsZipPath); } catch (_) {}
+    } else {
+      // No receipts — just show nav buttons on a follow-up message
+      await send(chatId, `_No receipt images recorded for ${periodName}._`, {
+        reply_markup: { inline_keyboard: [
+          [{ text: '📊 Download Another Period', callback_data: 'nav_export_expenses' }],
+          [{ text: '📋 All Expenses',            callback_data: 'nav_expenses'        }],
+        ]},
+      });
+    }
+
   } catch (err) {
     console.error('Expense export error:', err.message);
     send(chatId, '⚠️ Error creating expense report. Please try again.');
