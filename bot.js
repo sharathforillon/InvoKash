@@ -1226,6 +1226,20 @@ async function handleCommandState(chatId, userId, text) {
   if (!state) return;
   const lower = text.toLowerCase().trim();
 
+  // ── Universal escape hatch ───────────────────────────────────────────────────
+  // If the user types a greeting, slash command, or navigation keyword while ANY
+  // state is active, silently clear the state and route normally. Prevents "Hi"
+  // being swallowed by expect_expense / expect_invoice and treated as task input.
+  const isGreeting  = /^(hi|hello|hey|howdy|greetings|salaam|سلام|مرحبا|good\s+(morning|afternoon|evening))\b/i.test(lower);
+  const isSlashCmd  = text.trim().startsWith('/');
+  const isNavWord   = /^(home|menu|help|back|cancel|stop|nevermind|never mind|start over)\b/i.test(lower);
+
+  if ((isGreeting || isSlashCmd || isNavWord) &&
+      (state.type === 'expect_expense' || state.type === 'expect_invoice')) {
+    delete commandState[userId];
+    return handleTextMessage(chatId, userId, text, '');
+  }
+
   // ── Context routing from prompt screens ─────────────────────────────────────
   // After the expense/invoice prompt, ANY text the user types goes to the right handler.
   // No magic trigger words needed — the prompt established the intent.
