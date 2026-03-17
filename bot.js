@@ -1137,8 +1137,10 @@ async function handleTextMessage(chatId, userId, text, firstName) {
     }
   }
 
-  // Expense logging: "spent X on Y" or "expense: X for Y"
-  if (/\b(spent|expense[d]?|paid for|cost[s]?)\b/i.test(lower) && /\d+/.test(lower)) {
+  // Expense logging — broad keyword shortcut (mirrors quickClassify in core.js)
+  // Catches keywords BEFORE the AI classifier sees the text, preventing misclassification
+  const expenseKeywords = /\b(spent|expense[d]?|paid\s+for|cost[s]?|bought|purchase[d]?|rent|petrol|fuel|gas|grocery|groceries|food|lunch|dinner|breakfast|coffee|meal|transport|taxi|uber|parking|toll|subscription|supplies|stationery|salary|wage[s]?|payroll|utility|utilities|electric|electricity|internet|insurance|maintenance|repair[s]?|travel|hotel|flight|airfare|marketing|advertising)\b/i;
+  if (expenseKeywords.test(lower) && /\d/.test(lower)) {
     if (commandState[userId]?.type === 'expense_confirm') return; // handled elsewhere
     return handleExpenseEntry(chatId, userId, text);
   }

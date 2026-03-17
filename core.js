@@ -302,7 +302,19 @@ function quickClassify(text) {
   if (/\b(invoice|bill|invoices|history)\b/i.test(t) && !/\bfor\b.*\d/.test(t)) return 'list_invoices';
   if (/\b(profile|settings?|account)\b/i.test(t)) return 'profile';
   if (/\b(customer|client)s?\b/i.test(t) && !/\bfor\b.*\d/.test(t)) return 'customers';
-  // Invoice pattern: has "for X" with a number
+
+  // ── Expense patterns — must come BEFORE invoice patterns ──────────────────
+  // Catches: "spent 200 on lunch", "bought coffee 15", "paid for parking 50",
+  //          "office rent 3000", "travel 200", "petrol 80", "food 45",
+  //          "subscription 99", "equipment 500", "salary 5000", "utilities 300"
+  if (/\b(spent|expense[d]?|paid\s+for|cost[s]?|bought|purchase[d]?|bill[ed]+\s+me)\b/i.test(t) && /\d/.test(t)) return 'expense';
+  if (/\b(rent|petrol|fuel|gas|grocery|groceries|food|lunch|dinner|breakfast|coffee|meal|transport|taxi|uber|parking|toll)\b/i.test(t) && /\d/.test(t)) return 'expense';
+  if (/\b(subscription|software|tool[s]?|equipment|supplies|stationery|printing|postage|courier|shipping)\b/i.test(t) && /\d/.test(t)) return 'expense';
+  if (/\b(salary|wage[s]?|staff|employee|payroll|contractor|freelancer|subcontractor)\b/i.test(t) && /\d/.test(t)) return 'expense';
+  if (/\b(utility|utilities|electric|electricity|water|internet|phone|mobile|insurance|maintenance|repair[s]?)\b/i.test(t) && /\d/.test(t)) return 'expense';
+  if (/\b(travel|hotel|accommodation|flight|airfare|train|bus|marketing|advertising|ad[s]?\s+spend)\b/i.test(t) && /\d/.test(t)) return 'expense';
+
+  // Invoice pattern: "service for ClientName, 5000" or "service for client for amount"
   if (/for\s+\S+.*\s+for\s+[\d,]+(\.\d+)?/i.test(t)) return 'invoice';
   if (/\d+(\.\d+)?\s*(aed|usd|eur|gbp|inr|sar|omr|kwd|qar|bhd|sgd|cad|aud|egp|دولار|درهم)/i.test(t)) return 'invoice';
   return null; // needs AI
@@ -320,12 +332,12 @@ async function classifyIntent(text) {
       {
         model:      'claude-haiku-4-5-20251001',
         max_tokens: 10,
-        messages:   [{ role: 'user', content: `Classify this message as exactly ONE word - invoice, greeting, help, stats, download, invalid:\n"${text.slice(0, 200)}"\nAnswer:` }]
+        messages:   [{ role: 'user', content: `Classify this message as exactly ONE word:\n- invoice: user wants to bill a client (e.g. "website for Ahmed 5000", "design work for John 2000")\n- expense: user is recording a cost they paid (e.g. "lunch 150", "office rent 3000", "bought software 99")\n- greeting: saying hello\n- help: asking for help\n- stats: asking about revenue/stats\n- download: asking to download data\n- invalid: anything else\n\nMessage: "${text.slice(0, 200)}"\nAnswer:` }]
       },
       { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 10000 }
     );
     const intent = res.data.content[0].text.toLowerCase().trim().replace(/[^a-z_]/g, '');
-    const valid  = ['invoice','greeting','help','stats','download','invalid'].includes(intent) ? intent : 'invalid';
+    const valid  = ['invoice','expense','greeting','help','stats','download','invalid'].includes(intent) ? intent : 'invalid';
     intentCache.set(cacheKey, valid);
     if (intentCache.size > 500) intentCache.delete(intentCache.keys().next().value); // LRU eviction
     return valid;
