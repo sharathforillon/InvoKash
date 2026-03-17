@@ -17,7 +17,7 @@ const {
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, calculateStats,
   classifyIntent, transcribeAudio, processInvoiceText, confirmInvoice,
-  markInvoicePaid, buildDownloadZip, saveData,
+  markInvoicePaid, buildDownloadZip, buildExpenseZip, saveData,
   getLastInvoiceForCustomer, getAgingReport,
   setRevenueGoal, getRevenueGoal,
   generateBusinessInsights, generateClientStatement,
@@ -27,6 +27,7 @@ const {
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,
   saveClientWhatsApp, getClientWhatsApp, listClients, deleteClient,
+  saveClientEmail, getClientEmail, sendInvoiceEmail,
   createRecurring, getRecurring, pauseRecurring, deleteRecurring, processRecurringInvoices,
   recordPartialPayment, getInvoicePayments,
   generateTaxReport,
@@ -63,7 +64,7 @@ function ensureMainKeyboard(chatId, userId) {
 }
 
 // ─── Onboarding Config ────────────────────────────────────────────────────────
-const ONBOARD_TOTAL = 10;
+const ONBOARD_TOTAL = 11;
 
 // ─── Currency paging state (for onboarding) ───────────────────────────────────
 const currencyPage = {}; // { userId: 0|1 }
@@ -479,17 +480,42 @@ async function handleOnboarding(chatId, userId, text) {
 
     case 'account_name':
       p.account_name = sanitizeInput(text);
+      state.step = 'owner_email';
+      send(chatId,
+        `${progressBar(8, ONBOARD_TOTAL)}\n\n` +
+        `📧 *Step 8 - Your Business Email*\n\n` +
+        `Enter your email address — you'll receive a copy (CC) of every invoice you email to clients.\n\n` +
+        `_e.g. ahmed@mybusiness.com_`,
+        { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip', callback_data: 'setup_skip' }]] }}
+      );
+      break;
+
+    case 'owner_email': {
+      if (input === 'skip') {
+        p.owner_email = '';
+      } else {
+        const emailInput = text.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput)) {
+          return send(chatId,
+            `⚠️ That doesn't look right. Please enter a valid email address, e.g. _ahmed@mybusiness.com_\n\n` +
+            `_(Or tap Skip to do this later)_`,
+            { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip', callback_data: 'setup_skip' }]] }}
+          );
+        }
+        p.owner_email = emailInput;
+      }
       state.step = 'tax_enabled';
       const taxType = CURRENCIES[p.currency]?.tax || 'VAT';
       send(chatId,
-        `${progressBar(8, ONBOARD_TOTAL)}\n\n` +
-        `📊 *Step 8 - Tax Settings*\n\nDo you charge *${taxType}* on your invoices?`,
+        `${progressBar(9, ONBOARD_TOTAL)}\n\n` +
+        `📊 *Step 9 - Tax Settings*\n\nDo you charge *${taxType}* on your invoices?`,
         { reply_markup: { inline_keyboard: [[
           { text: `✅ Yes, I charge ${taxType}`, callback_data: 'tax_yes' },
           { text: '❌ No tax',                   callback_data: 'tax_no'  }
         ]]}}
       );
       break;
+    }
 
     case 'tax_enabled': {
       const taxField = ['INR','SGD','AUD'].includes(p.currency) ? 'gst' : 'vat';
@@ -499,8 +525,8 @@ async function handleOnboarding(chatId, userId, text) {
         else                    { p.gst_enabled = false; p.gst_rate = 0; }
         state.step = 'tax_rate';
         send(chatId,
-          `${progressBar(9, ONBOARD_TOTAL)}\n\n` +
-          `📈 *Step 9 - ${taxField.toUpperCase()} Rate*\n\nEnter the percentage (e.g. \`5\` for 5%):`,
+          `${progressBar(10, ONBOARD_TOTAL)}\n\n` +
+          `📈 *Step 10 - ${taxField.toUpperCase()} Rate*\n\nEnter the percentage (e.g. \`5\` for 5%):`,
         );
       } else if (input === 'no') {
         p.vat_enabled = false; p.vat_rate = 0;
@@ -536,8 +562,8 @@ async function handleOnboarding(chatId, userId, text) {
 
 function sendLogoPrompt(chatId) {
   send(chatId,
-    `${progressBar(10, ONBOARD_TOTAL)}\n\n` +
-    `🖼 *Step 10 - Company Logo (Optional)*\n\nSend your logo as a PNG or JPG, or skip to use text header.`,
+    `${progressBar(11, ONBOARD_TOTAL)}\n\n` +
+    `🖼 *Step 11 - Company Logo (Optional)*\n\nSend your logo as a PNG or JPG, or skip to use text header.`,
     { reply_markup: { inline_keyboard: [[{ text: '⏭ Skip Logo', callback_data: 'setup_skip' }]] }}
   );
 }
@@ -550,8 +576,9 @@ async function sendSetupComplete(chatId, userId) {
   await send(chatId,
     `🎉 *You're all set, ${p.company_name}!*\n\n` +
     `${curr.flag || ''} ${p.currency}  ·  ${tc.type}: ${tc.enabled ? `${tc.rate}%` : 'None'}\n` +
-    `🏦 ${p.bank_name || '_No bank set_'}  ·  🖼 ${p.logo_path ? 'Logo uploaded' : 'Text header'}\n\n` +
-    `*Create your first invoice - just type or 🎤 voice:*\n` +
+    `🏦 ${p.bank_name || '_No bank set_'}  ·  🖼 ${p.logo_path ? 'Logo uploaded' : 'Text header'}\n` +
+    (p.owner_email ? `📧 CC emails → ${p.owner_email}\n` : '') +
+    `\n*Create your first invoice - just type or 🎤 voice:*\n` +
     `_"Web design for Acme Corp for 3000"_`,
     { reply_markup: { inline_keyboard: [
       [{ text: '🏠 Go to Dashboard', callback_data: 'nav_home' }],
@@ -586,6 +613,7 @@ function showProfile(chatId, userId) {
     `📍 ${p.company_address || '_Not set_'}\n` +
     `${curr.flag || '🌍'} ${p.currency}  ·  ${tc.type}: ${tc.enabled ? `${tc.rate}%` : 'None'}\n` +
     (p.trn ? `🔐 TRN: \`${p.trn}\`\n` : '') +
+    (p.owner_email ? `📧 ${p.owner_email}\n` : `📧 _Email not set — tap Update to add_\n`) +
     `\n🏦 *Bank*\n` +
     `${p.bank_name || '_Not set_'}  ·  ${maskedIban}\n` +
     `${p.account_name || ''}\n` +
@@ -681,14 +709,16 @@ async function showInvoices(chatId, userId) {
       const customer = inv.customer_name?.trim() || 'Client';
       const amount   = formatAmount(parseFloat(inv.remaining || inv.total) || 0, inv.currency || currency);
       const shortId  = inv.invoice_id.replace(`INV-${new Date().getFullYear()}-`, '#').replace(/^INV-\d{4}-/, '#').replace('INV-', '#');
-      // Full-width label button (shows context - tapping does nothing visible)
+      // Context row — who, how much, which invoice (full width, tapping does nothing)
       keyboard.push([
-        { text: `📄 ${customer} · ${amount} · ${shortId}`, callback_data: `noop_${inv.invoice_id}` }
+        { text: `📄 ${customer}  ${amount}  ${shortId}`, callback_data: `noop_${inv.invoice_id}` }
       ]);
-      // Action buttons below it - clearly linked by position
+      // Each action on its own full-width row — no truncation, crystal clear
       keyboard.push([
-        { text: `✅ Mark as Paid in Full`,  callback_data: `paid_${inv.invoice_id}`    },
-        { text: `💰 Record Part Payment`,   callback_data: `partial_${inv.invoice_id}` },
+        { text: `✅ Mark Paid — ${customer}`, callback_data: `paid_${inv.invoice_id}` }
+      ]);
+      keyboard.push([
+        { text: `💰 Part Payment — ${customer}`, callback_data: `partial_${inv.invoice_id}` }
       ]);
     });
   }
@@ -948,6 +978,83 @@ async function downloadInvoices(chatId, userId, period) {
   } catch (err) {
     console.error('Download error:', err.message);
     send(chatId, '⚠️ Error creating download. Please try again.');
+  }
+}
+
+// ─── Expense Export Period Picker ────────────────────────────────────────────
+function showExpenseDownloadPicker(chatId, userId) {
+  const expenses = expenseHistory[userId] || [];
+  if (expenses.length === 0) {
+    return send(chatId,
+      `💸 No expenses recorded yet.\n\nStart by logging an expense or sending a 📸 receipt photo.`,
+      { reply_markup: { inline_keyboard: [[{ text: '📋 All Expenses', callback_data: 'nav_expenses' }]] }}
+    );
+  }
+  send(chatId,
+    `📥 *Download Expenses*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Which period do you need?\n\n` +
+    `_You'll get a ZIP with:_\n` +
+    `• \`expenses.csv\` — ready to share with your accountant\n` +
+    `• \`receipts/\` folder — all scanned receipts matched by row\n\n` +
+    `_Columns: Date · Description · Merchant · Category · Amount · Currency · Tax Amount · Deductible · Receipt File_`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '📅 This Month',    callback_data: 'exp_dl_this_month'   }],
+      [{ text: '📅 Last Month',    callback_data: 'exp_dl_last_month'   }],
+      [{ text: '📅 This Quarter',  callback_data: 'exp_dl_this_quarter' }],
+      [{ text: '📅 This Year',     callback_data: 'exp_dl_this_year'    }],
+      [{ text: '📦 All Time',      callback_data: 'exp_dl_all'          }],
+    ]}}
+  );
+}
+
+// ─── Expense Export (CSV + receipts ZIP) for a specific period ───────────────
+async function downloadExpenses(chatId, userId, period = 'all') {
+  try {
+    const result = await buildExpenseZip(userId, period);
+
+    if (!result) {
+      return send(chatId,
+        `💸 No expenses recorded yet.\n\nStart by logging an expense or sending a 📸 receipt photo.`,
+        { reply_markup: { inline_keyboard: [[{ text: '📋 All Expenses', callback_data: 'nav_expenses' }]] }}
+      );
+    }
+
+    if (result.empty) {
+      return send(chatId,
+        `📭 No expenses found for *${PERIOD_NAMES[period] || period}*.\n\nTry a different period or choose All Time.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📥 Pick Different Period', callback_data: 'nav_export_expenses' }],
+          [{ text: '📋 All Expenses',          callback_data: 'nav_expenses'        }],
+        ]}}
+      );
+    }
+
+    const { zipPath, count, total, receiptCount: rc, currency, periodName } = result;
+
+    await send(chatId, `⏳ _Preparing ${count} expense${count !== 1 ? 's' : ''}${rc > 0 ? ` + ${rc} receipt${rc > 1 ? 's' : ''}` : ''}…_`);
+
+    let caption = `📦 *Expense Export — ${periodName}*\n`;
+    caption += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    caption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  ${formatAmount(total, currency)}\n`;
+    if (rc > 0) caption += `📸 ${rc} receipt file${rc !== 1 ? 's' : ''} included\n`;
+    caption += `\n*How to use with your accountant:*\n`;
+    caption += `1️⃣ Open \`expenses.csv\` in Excel or Numbers\n`;
+    caption += `2️⃣ Fill the *Tax Amount* column with input VAT/GST you can reclaim\n`;
+    caption += `3️⃣ Mark *Deductible* as NO for any personal items\n`;
+    if (rc > 0) caption += `4️⃣ The \`receipts/\` folder matches each row by *Receipt File* column\n`;
+    caption += `\n_Each row has a unique Expense ID for audit trail._`;
+
+    await bot.sendDocument(chatId, zipPath, { caption, parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [{ text: '📥 Download Another Period', callback_data: 'nav_export_expenses' }],
+        [{ text: '📋 All Expenses',            callback_data: 'nav_expenses'        }],
+      ]}
+    });
+    try { fs.unlinkSync(zipPath); } catch (_) {}
+  } catch (err) {
+    console.error('Expense export error:', err.message);
+    send(chatId, '⚠️ Error creating expense export. Please try again.');
   }
 }
 
@@ -1219,9 +1326,40 @@ async function handleCommandState(chatId, userId, text) {
     }
     saveClientWhatsApp(userId, state.customerName, phone);
     delete commandState[userId];
-    // Now send the invoice
     await send(chatId, `✅ Saved ${state.customerName}'s number as ${phone}\n\n📱 Sending invoice now...`);
     return handleWaSendInvoice(chatId, userId, state.invoiceId);
+  }
+
+  // ── Email send - address input (CLIENT email) ────────────────────────────
+  if (state.type === 'email_send_address') {
+    const email = text.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return send(chatId,
+        `⚠️ That doesn't look like a valid email address.\n\nPlease enter a valid address, e.g. _ahmed@company.com_`
+      );
+    }
+    saveClientEmail(userId, state.customerName, email);
+    delete commandState[userId];
+    await send(chatId, `✅ Saved ${state.customerName}'s email as ${email}\n\n📧 Sending invoice now...`);
+    return handleEmailSendInvoice(chatId, userId, state.invoiceId);
+  }
+
+  // ── Email send - owner's own email (captured before first email send) ────
+  if (state.type === 'owner_email_then_send') {
+    const email = text.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return send(chatId,
+        `⚠️ That doesn't look like a valid email address.\n\nPlease enter yours, e.g. _you@yourbusiness.com_`,
+        { reply_markup: { force_reply: true, selective: true,
+            input_field_placeholder: 'e.g. you@yourbusiness.com' }}
+      );
+    }
+    if (!companyProfiles[userId]) companyProfiles[userId] = {};
+    companyProfiles[userId].owner_email = email;
+    saveData();
+    delete commandState[userId];
+    await send(chatId, `✅ Saved — you'll be CC'd at *${email}* on every invoice email.\n\n📧 Now sending to ${state.customerName}...`);
+    return handleEmailSendInvoice(chatId, userId, state.invoiceId);
   }
 
   // ── Credit note - invoice ID input ──────────────────────────────────────────
@@ -1353,9 +1491,8 @@ async function handleInvoiceRequest(chatId, userId, text) {
 
   await send(chatId, preview, {
     reply_markup: { inline_keyboard: [
-      [{ text: '✅ Generate PDF',   callback_data: 'confirm_invoice'  }],
-      [{ text: '📝 Save as Quote',  callback_data: 'save_as_quote'    }],
-      [{ text: '✏️ Edit Details',   callback_data: 'retry_invoice'    }]
+      [{ text: '✅ Generate PDF',  callback_data: 'confirm_invoice' }],
+      [{ text: '✏️ Edit Details',  callback_data: 'retry_invoice'  }]
     ]}
   });
 }
@@ -1378,23 +1515,21 @@ async function handleConfirmInvoice(chatId, userId) {
       caption += `\n\n_Forward the PDF above to your client._`;
     }
 
-    // Build WhatsApp send button if client has WhatsApp saved
+    // Build send buttons — personalised labels if client details already saved
     const clientPhone = getClientWhatsApp(userId, result.customer);
-    const waLabel = clientPhone
-      ? `📱 Send to ${result.customer.split(' ')[0]}`
-      : `📱 Send to Client's WhatsApp`;
+    const clientEmail = getClientEmail(userId, result.customer);
+    const firstName   = result.customer.split(' ')[0];
+    const waLabel     = clientPhone ? `📱 Send to ${firstName}` : `📱 Send to Client's WhatsApp`;
+    const emailLabel  = clientEmail ? `📧 Email to ${firstName}` : `📧 Send to Client's Email`;
 
     await bot.sendDocument(chatId, result.pdfPath, { caption, parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: [
-        [{ text: '✅ Mark as Paid',    callback_data: `paid_${result.invoiceId}` }],
-        [{ text: waLabel,             callback_data: `wa_send_${result.invoiceId}` }],
+        [{ text: '✅ Mark as Paid',     callback_data: `paid_${result.invoiceId}`            }],
+        [{ text: waLabel,              callback_data: `wa_send_${result.invoiceId}`          }],
+        [{ text: emailLabel,           callback_data: `email_send_${result.invoiceId}`       }],
         [
-          { text: '💾 Save Template', callback_data: 'save_template'            },
-          { text: '🔄 Make Recurring',callback_data: `recurring_setup_${result.invoiceId}` },
-        ],
-        [
-          { text: '📋 Invoices',      callback_data: 'nav_invoices'             },
-          { text: '🏠 Home',          callback_data: 'nav_home'                 },
+          { text: '💾 Save Template',  callback_data: 'save_template'                       },
+          { text: '🔄 Make Recurring', callback_data: `recurring_setup_${result.invoiceId}` },
         ]
       ]}
     });
@@ -1865,7 +2000,8 @@ async function showExpenses(chatId, userId) {
     );
   }
 
-  const recent     = expenses.slice(-10).reverse();
+  const SHOW_LIMIT = 20;
+  const recent     = expenses.slice(-SHOW_LIMIT).reverse();
   const thisMonth  = getExpenses(userId, 'this_month');
   const monthTotal = thisMonth.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   const allTotal   = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
@@ -1874,9 +2010,9 @@ async function showExpenses(chatId, userId) {
   let msg = `💸 *Expense Tracker*\n`;
   msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
   msg += `📅 This Month: *${formatAmount(monthTotal, currency)}*\n`;
-  msg += `📊 All Time: ${formatAmount(allTotal, currency)}\n`;
+  msg += `📊 All Time: ${formatAmount(allTotal, currency)}  ·  ${expenses.length} expense${expenses.length !== 1 ? 's' : ''}\n`;
   if (receiptCount > 0) {
-    msg += `📸 ${receiptCount} receipt${receiptCount > 1 ? 's' : ''} saved - export to get them all for tax filing\n`;
+    msg += `📸 ${receiptCount} receipt${receiptCount > 1 ? 's' : ''} saved\n`;
   }
   msg += `\n*Recent Expenses:*\n\n`;
 
@@ -1889,15 +2025,19 @@ async function showExpenses(chatId, userId) {
     msg += `  ${merchantStr} 🏷 ${exp.category}  ·  📅 ${exp.date}\n\n`;
   });
 
-  if (expenses.length > 10) msg += `_+${expenses.length - 10} older expenses_\n`;
+  if (expenses.length > SHOW_LIMIT) msg += `_+${expenses.length - SHOW_LIMIT} older expenses · export for full list_\n`;
   msg += `\n_Send a 📸 photo or 📄 PDF (tickets, invoices) to auto-scan._`;
 
+  const exportLabel = receiptCount > 0
+    ? `📥 Export CSV + ${receiptCount} Receipt${receiptCount > 1 ? 's' : ''}`
+    : `📥 Export Expenses CSV`;
+
   await send(chatId, msg, { reply_markup: { inline_keyboard: [
+    [{ text: exportLabel, callback_data: 'nav_export_expenses' }],
     [
-      { text: '📈 P&L Report', callback_data: 'nav_profit'   },
-      { text: '📥 Export All', callback_data: 'nav_download' },
+      { text: '📈 P&L Report', callback_data: 'nav_profit' },
+      { text: '🏠 Home',       callback_data: 'nav_home'   },
     ],
-    [{ text: '🏠 Home', callback_data: 'nav_home' }]
   ]}});
 }
 
@@ -2053,20 +2193,25 @@ async function showClients(chatId, userId) {
   if (!profile) return send(chatId, '⚠️ Please set up your profile first with /setup.');
 
   const clients = listClients(userId);
-  let msg = `📱 *Client Directory*\n\n`;
-  msg += `_Save client WhatsApp numbers to send invoices directly._\n\n`;
+  let msg = `👤 *Client Directory*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
   if (clients.length === 0) {
-    msg += `No clients saved yet.\n\nAfter creating an invoice, tap _"Send to Client's WhatsApp"_ to save their number.`;
+    msg += `No clients saved yet.\n\n`;
+    msg += `Contact details are saved automatically the first time you send an invoice to a client via WhatsApp or Email.`;
   } else {
+    msg += `${clients.length} client${clients.length !== 1 ? 's' : ''} saved\n\n`;
     clients.forEach(c => {
       msg += `👤 *${c.name}*\n`;
       if (c.whatsapp) msg += `   📱 \`${c.whatsapp}\`\n`;
+      if (c.email)    msg += `   📧 \`${c.email}\`\n`;
+      if (!c.whatsapp && !c.email) msg += `   _No contact details yet_\n`;
+      msg += '\n';
     });
   }
 
   const keyboard = [];
-  clients.slice(0, 4).forEach(c => {
+  clients.slice(0, 5).forEach(c => {
     keyboard.push([{ text: `🗑 Remove: ${c.name}`, callback_data: `client_del_${encodeURIComponent(c.name)}` }]);
   });
   keyboard.push([{ text: '🏠 Home', callback_data: 'nav_home' }]);
@@ -2363,6 +2508,79 @@ async function handleWaSendInvoice(chatId, userId, invoiceId, queryId) {
   }
 }
 
+// ─── Email Invoice to Client ──────────────────────────────────────────────────
+async function handleEmailSendInvoice(chatId, userId, invoiceId, queryId) {
+  if (queryId) bot.answerCallbackQuery(queryId).catch(() => {});
+
+  const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
+  if (!inv) return send(chatId, '⚠️ Invoice not found.');
+
+  // Check SMTP is configured
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    return send(chatId,
+      `⚠️ *Email sending not configured.*\n\n` +
+      `Add the following to your \`.env\` file on the VPS:\n\n` +
+      `\`\`\`\nSMTP_HOST=smtp.gmail.com\nSMTP_PORT=587\nSMTP_USER=you@gmail.com\nSMTP_PASS=your_app_password\nSMTP_FROM=Your Business Name\n\`\`\`\n\n` +
+      `_See \`.env.example\` for full setup instructions (Gmail, Outlook, etc.)_`,
+      { reply_markup: { inline_keyboard: [[{ text: '🏠 Home', callback_data: 'nav_home' }]] }}
+    );
+  }
+
+  const profile     = companyProfiles[userId];
+  const clientEmail = getClientEmail(userId, inv.customer_name);
+
+  // If owner hasn't set their own email yet, ask for it first so they get CC'd
+  if (!profile.owner_email) {
+    commandState[userId] = { type: 'owner_email_then_send', invoiceId, customerName: inv.customer_name };
+    return send(chatId,
+      `📧 *One quick thing — what's your business email?*\n\n` +
+      `You'll receive a copy (CC) of every invoice you email to clients.\n\n` +
+      `_e.g. ahmed@mybusiness.com_\n\n` +
+      `_You can also set this any time via /profile → Update Profile_`,
+      { reply_markup: { force_reply: true, selective: true,
+          input_field_placeholder: 'e.g. you@yourbusiness.com' }}
+    );
+  }
+
+  if (clientEmail) {
+    await send(chatId, `📧 _Sending to ${inv.customer_name} at ${clientEmail}…_`);
+    try {
+      await sendInvoiceEmail(clientEmail, inv.customer_name, profile, inv, inv.file_path);
+
+      const ccLine = profile.owner_email ? `\n📬 CC'd to you at ${profile.owner_email}` : '';
+      await send(chatId,
+        `✅ *Invoice emailed to ${inv.customer_name}!*\n\n` +
+        `📧 ${clientEmail}${ccLine}\n` +
+        `_PDF attached${inv.payment_link ? ' + payment link included' : ''}._`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📋 Invoices', callback_data: 'nav_invoices' }],
+          [{ text: '🏠 Home',     callback_data: 'nav_home'     }],
+        ]}}
+      );
+    } catch (err) {
+      console.error('Email send error:', err.message);
+      send(chatId,
+        `⚠️ *Couldn't email ${inv.customer_name}*\n\n_${err.message}_\n\n` +
+        `Check your SMTP settings in \`.env\` and try again.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📧 Try Again', callback_data: `email_send_${invoiceId}` }],
+          [{ text: '🏠 Home',      callback_data: 'nav_home'                }],
+        ]}}
+      );
+    }
+  } else {
+    // No client email on file — ask for it
+    commandState[userId] = { type: 'email_send_address', invoiceId, customerName: inv.customer_name };
+    await send(chatId,
+      `📧 *Email Invoice to ${inv.customer_name}*\n\n` +
+      `What's their email address?\n\n` +
+      `_I'll save it for next time too!_`,
+      { reply_markup: { force_reply: true, selective: true,
+          input_field_placeholder: 'e.g. ahmed@company.com' }}
+    );
+  }
+}
+
 // ─── Recurring Setup Handler ────────────────────────────────────────────────────
 async function handleRecurringSetup(chatId, userId, invoiceId) {
   const inv = (invoiceHistory[userId] || []).find(i => i.invoice_id === invoiceId);
@@ -2515,8 +2733,10 @@ function startTelegramBot() {
       else if (data === 'nav_aging')         showAgingDashboard(chatId, userId);
       else if (data === 'nav_goal')          showGoalSetter(chatId, userId);
       else if (data === 'nav_templates')     showTemplates(chatId, userId);
-      else if (data === 'nav_expenses')      showExpenses(chatId, userId);
-      else if (data === 'nav_profit')        showProfitLoss(chatId, userId, 'this_month');
+      else if (data === 'nav_expenses')          showExpenses(chatId, userId);
+      else if (data === 'nav_export_expenses')   showExpenseDownloadPicker(chatId, userId);
+      else if (data.startsWith('exp_dl_'))       downloadExpenses(chatId, userId, data.replace('exp_dl_', ''));
+      else if (data === 'nav_profit')            showProfitLoss(chatId, userId, 'this_month');
       else if (data === 'nav_statement')     selectClientForStatement(chatId, userId);
       // v2.2 nav
       else if (data === 'nav_services')      showServices(chatId, userId);
@@ -2547,19 +2767,12 @@ function startTelegramBot() {
           delete commandState[userId];
           const currency = companyProfiles[userId]?.currency || 'AED';
           send(chatId,
-            `✅ *Expense Logged!*\n\n` +
+            `✅ *Expense Logged*\n\n` +
             `📝 ${expense.description}\n` +
-            `🏷 ${expense.category}  ·  💰 *${formatAmount(expense.amount, currency)}*\n\n` +
-            `_Ready to bill a client?_`,
+            `🏷 ${expense.category}  ·  💰 *${formatAmount(expense.amount, currency)}*`,
             { reply_markup: { inline_keyboard: [
-              [
-                { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
-                { text: '💸 Log Another',  callback_data: 'nav_log_expense' },
-              ],
-              [
-                { text: '📈 P&L Report', callback_data: 'nav_profit' },
-                { text: '🏠 Home',       callback_data: 'nav_home'   },
-              ],
+              [{ text: '📋 All Expenses',       callback_data: 'nav_expenses'        }],
+              [{ text: '📥 Download Expenses',  callback_data: 'nav_export_expenses' }],
             ]}}
           );
         }
@@ -2576,21 +2789,14 @@ function startTelegramBot() {
           const currency = companyProfiles[userId]?.currency || 'AED';
           const merchantNote = expense.merchant ? `  ·  🏪 ${expense.merchant}` : '';
           send(chatId,
-            `✅ *Expense Logged!*\n\n` +
+            `✅ *Expense Logged*\n\n` +
             `📝 ${expense.description}${merchantNote}\n` +
             `🏷 ${expense.category}  ·  📅 ${expense.date}\n` +
-            `💰 *${formatAmount(expense.amount, currency)}*\n\n` +
-            `📸 Receipt saved for tax filing.\n\n` +
-            `_Ready to bill a client?_`,
+            `💰 *${formatAmount(expense.amount, currency)}*\n` +
+            `📸 Receipt saved`,
             { reply_markup: { inline_keyboard: [
-              [
-                { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
-                { text: '💸 Log Another',  callback_data: 'nav_log_expense' },
-              ],
-              [
-                { text: '📥 Export All', callback_data: 'nav_download' },
-                { text: '🏠 Home',       callback_data: 'nav_home'     },
-              ],
+              [{ text: '📋 All Expenses',       callback_data: 'nav_expenses'        }],
+              [{ text: '📥 Download Expenses',  callback_data: 'nav_export_expenses' }],
             ]}}
           );
         }
@@ -2613,7 +2819,8 @@ function startTelegramBot() {
       else if (data.startsWith('paid_'))     handleMarkPaid(chatId, userId, data.replace('paid_', ''), query.id);
       // v2.2 callbacks
       else if (data.startsWith('partial_'))  handlePartialPayment(chatId, userId, data.replace('partial_', ''), query.id);
-      else if (data.startsWith('wa_send_'))  handleWaSendInvoice(chatId, userId, data.replace('wa_send_', ''), query.id);
+      else if (data.startsWith('wa_send_'))    handleWaSendInvoice(chatId, userId, data.replace('wa_send_', ''), query.id);
+      else if (data.startsWith('email_send_')) handleEmailSendInvoice(chatId, userId, data.replace('email_send_', ''), query.id);
       else if (data === 'save_as_quote') {
         const pending = pendingInvoices[userId];
         if (!pending) return send(chatId, '⚠️ No pending quote data. Try describing the invoice again.');

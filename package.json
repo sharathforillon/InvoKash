@@ -7,7 +7,13 @@
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
-  "keywords": ["invoice", "bot", "telegram", "whatsapp", "ai"],
+  "keywords": [
+    "invoice",
+    "bot",
+    "telegram",
+    "whatsapp",
+    "ai"
+  ],
   "author": "InvoKash",
   "license": "ISC",
   "dependencies": {
@@ -17,6 +23,7 @@
     "express": "^4.19.2",
     "form-data": "^4.0.5",
     "node-telegram-bot-api": "^0.67.0",
+    "nodemailer": "^6.10.1",
     "openai": "^6.18.0",
     "pdfkit": "^0.17.2",
     "qrcode": "^1.5.4",

@@ -166,6 +166,11 @@ function formatAmount(amount, currency) {
   return cfg.right ? `${num} ${cfg.symbol}` : `${cfg.symbol}${num}`;
 }
 
+// Escape HTML special chars for use in email templates
+function escHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 function progressBar(step, total) {
   const filled = Math.round((step / total) * 10);
   return `[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ${step}/${total}`;
@@ -249,6 +254,43 @@ function generateCSV(invoices) {
   return csv;
 }
 
+// ─── Expense CSV ──────────────────────────────────────────────────────────────
+function generateExpenseCSV(expenses, fallbackCurrency = '') {
+  const esc = (v) => {
+    if (v == null) return '';
+    const s = String(v).replace(/"/g, '""');
+    return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s}"` : s;
+  };
+  // Columns designed for tax reconciliation:
+  // Expense ID  — unique ref for audit trail
+  // Date        — DD/MM/YYYY as recorded
+  // Description — what was purchased
+  // Merchant    — supplier name (from receipt scan)
+  // Category    — maps to deductible category
+  // Amount      — net amount
+  // Currency    — for multi-currency books
+  // Tax Amount  — pre-filled 0.00; accountant fills actual input tax
+  // Deductible  — YES for all logged expenses (accountant adjusts as needed)
+  // Receipt     — filename in the receipts/ folder; blank = no receipt
+  let csv = 'Expense ID,Date,Description,Merchant,Category,Amount,Currency,Tax Amount,Deductible,Receipt File\n';
+  expenses.forEach(exp => {
+    const receiptFile = exp.receipt_path ? path.basename(exp.receipt_path) : '';
+    csv += [
+      esc(exp.id || ''),
+      esc(exp.date),
+      esc(exp.description),
+      esc(exp.merchant || ''),
+      esc(exp.category),
+      esc((parseFloat(exp.amount) || 0).toFixed(2)),
+      esc(exp.currency || fallbackCurrency),
+      esc('0.00'),        // Tax Amount — accountant fills input VAT/GST reclaim
+      esc('YES'),         // Deductible — default YES; accountant marks exceptions
+      esc(receiptFile),
+    ].join(',') + '\n';
+  });
+  return csv;
+}
+
 // ─── AI: Intent Classification (with caching for cost savings) ────────────────
 // Simple regex pre-screen - avoids AI call entirely for obvious cases
 function quickClassify(text) {
@@ -314,7 +356,8 @@ Return this exact JSON:
   ]
 }
 
-Rules: customer_name = who is billed, amounts are numbers only (no currency symbols), split multi-service invoices into separate line_items.`
+Rules: customer_name = who is billed, amounts are numbers only (no currency symbols), split multi-service invoices into separate line_items.
+IMPORTANT: ALL text fields (customer_name, address, description) MUST be in English. If the input is in Arabic, Hindi, or any other language, translate every text field to English before returning.`
       }]
     },
     { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
@@ -343,13 +386,16 @@ function validateInvoiceData(data) {
 }
 
 // ─── Voice Transcription ──────────────────────────────────────────────────────
+// Uses Whisper's *translation* endpoint (not transcription) so that any language
+// — Arabic, Hindi, French, Spanish, etc. — is always returned as English text.
+// This prevents both intent-classification failures and PDF font gibberish.
 async function transcribeAudio(filePath) {
   if (!openai) throw new Error('OpenAI not configured');
-  const transcription = await openai.audio.transcriptions.create({
+  const translation = await openai.audio.translations.create({
     file:  fs.createReadStream(filePath),
     model: 'whisper-1',
   });
-  return transcription.text;
+  return translation.text;
 }
 
 // ─── Payment Link ─────────────────────────────────────────────────────────────
@@ -764,6 +810,49 @@ async function buildDownloadZip(userId, period) {
   return { zipPath, filtered, stats, currency };
 }
 
+// ─── Expense Download ZIP (expenses.csv + all receipt files) ──────────────────
+async function buildExpenseZip(userId, period = 'all') {
+  const allExpenses = expenseHistory[userId] || [];
+  if (allExpenses.length === 0) return null;
+
+  // Filter by period, then sort oldest-first (accountant-friendly)
+  const periodFiltered = period === 'all'
+    ? allExpenses.slice()
+    : filterInvoicesByPeriod(allExpenses, period);   // works for any array with a date field
+
+  if (periodFiltered.length === 0) return { empty: true, period };
+
+  const sorted   = periodFiltered.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const ts       = Date.now();
+  const zipPath  = `/tmp/expenses_${userId}_${ts}.zip`;
+  const csvPath  = `/tmp/expenses_${userId}_${ts}.csv`;
+  const currency = companyProfiles[userId]?.currency || 'AED';
+
+  fs.writeFileSync(csvPath, generateExpenseCSV(sorted, currency));
+
+  await new Promise((resolve, reject) => {
+    const output  = fs.createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 7 } });
+    output.on('close', resolve);
+    archive.on('error', reject);
+    archive.pipe(output);
+    archive.file(csvPath, { name: 'expenses.csv' });
+    sorted.forEach(exp => {
+      if (exp.receipt_path && fs.existsSync(exp.receipt_path)) {
+        archive.file(exp.receipt_path, { name: `receipts/${path.basename(exp.receipt_path)}` });
+      }
+    });
+    archive.finalize();
+  });
+
+  try { fs.unlinkSync(csvPath); } catch (_) {}
+
+  const total        = sorted.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const receiptCount = sorted.filter(e => e.receipt_path && fs.existsSync(e.receipt_path)).length;
+  const periodName   = PERIOD_NAMES[period] || 'All Time';
+  return { zipPath, count: sorted.length, total, receiptCount, currency, period, periodName };
+}
+
 // ─── Quick Re-Invoice ─────────────────────────────────────────────────────────
 function getLastInvoiceForCustomer(userId, customerName) {
   const invs       = invoiceHistory[userId] || [];
@@ -1015,7 +1104,7 @@ async function extractExpenseData(text) {
       max_tokens: 180,
       messages:   [{
         role:    'user',
-        content: `Extract expense details from this text. Return ONLY valid JSON.\n\nText: "${text.slice(0, 300)}"\n\nReturn this exact JSON:\n{\n  "description": "what the expense was for",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other"\n}\n\nRules: amount is a positive number only, no currency symbols.`,
+        content: `Extract expense details from this text. Return ONLY valid JSON.\n\nText: "${text.slice(0, 300)}"\n\nReturn this exact JSON:\n{\n  "description": "what the expense was for",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other"\n}\n\nRules: amount is a positive number only, no currency symbols.\nIMPORTANT: ALL text fields (description) MUST be in English. Translate from any other language to English.`,
       }],
     },
     { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 12000 }
@@ -1041,7 +1130,7 @@ async function extractExpenseFromPDF(pdfBuffer) {
           },
           {
             type: 'text',
-            text: `Look at this document (flight ticket, hotel booking, invoice, receipt, or bill) and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description (e.g. Flight to Dubai, Hotel Marriott 2 nights, Software license Adobe)",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "airline, hotel, company or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.`,
+            text: `Look at this document (flight ticket, hotel booking, invoice, receipt, or bill) and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description (e.g. Flight to Dubai, Hotel Marriott 2 nights, Software license Adobe)",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "airline, hotel, company or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.\nIMPORTANT: ALL text fields (description, merchant) MUST be in English. Translate from any other language to English.`,
           },
         ],
       }],
@@ -1077,7 +1166,7 @@ async function extractExpenseFromImage(imageBuffer, mediaType) {
           },
           {
             type: 'text',
-            text: `Look at this receipt or invoice image and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description of what was purchased",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "store or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible on the receipt, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.`,
+            text: `Look at this receipt or invoice image and extract the expense details. Return ONLY valid JSON.\n\nReturn this exact JSON:\n{\n  "description": "short clear description of what was purchased",\n  "amount": 0.00,\n  "category": "one of: Travel, Software, Office, Marketing, Subcontractors, Equipment, Other",\n  "merchant": "store or vendor name if visible, otherwise empty string",\n  "date": "DD/MM/YYYY if a date is clearly visible on the receipt, otherwise empty string"\n}\n\nRules: amount is the TOTAL final amount as a positive number, no currency symbols.\nIMPORTANT: ALL text fields (description, merchant) MUST be in English. Translate from any other language to English.`,
           },
         ],
       }],
@@ -1244,8 +1333,14 @@ function normalizeClientName(name) {
 
 function saveClientWhatsApp(userId, customerName, phone) {
   if (!clientDirectory[userId]) clientDirectory[userId] = {};
-  const key = normalizeClientName(customerName);
-  clientDirectory[userId][key] = { name: customerName, whatsapp: phone.replace(/[^+\d]/g, ''), email: '' };
+  const key      = normalizeClientName(customerName);
+  const existing = clientDirectory[userId][key] || {};
+  // Merge — never wipe existing email when adding WhatsApp
+  clientDirectory[userId][key] = {
+    name:     customerName,
+    whatsapp: phone.replace(/[^+\d]/g, ''),
+    email:    existing.email || '',
+  };
   saveData();
   return true;
 }
@@ -1268,6 +1363,174 @@ function deleteClient(userId, customerName) {
     return true;
   }
   return false;
+}
+
+function saveClientEmail(userId, customerName, email) {
+  if (!clientDirectory[userId]) clientDirectory[userId] = {};
+  const key      = normalizeClientName(customerName);
+  const existing = clientDirectory[userId][key] || {};
+  // Merge — never wipe existing WhatsApp when adding email
+  clientDirectory[userId][key] = {
+    name:     existing.name     || customerName,
+    whatsapp: existing.whatsapp || '',
+    email:    email.trim().toLowerCase(),
+  };
+  saveData();
+  return true;
+}
+
+function getClientEmail(userId, customerName) {
+  const dir = clientDirectory[userId] || {};
+  const key = normalizeClientName(customerName);
+  return (
+    dir[key] ||
+    dir[Object.keys(dir).find(k => k.includes(normalizeClientName(customerName.split(' ')[0])))] ||
+    {}
+  ).email || null;
+}
+
+// ─── Email (SMTP) via Nodemailer ──────────────────────────────────────────────
+let _emailTransporter = null;
+
+function getEmailTransporter() {
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT) || 587;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!host || !user || !pass) return null;
+  if (_emailTransporter) return _emailTransporter;
+  const nodemailer = require('nodemailer');
+  _emailTransporter = nodemailer.createTransport({
+    host, port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+  return _emailTransporter;
+}
+
+async function sendInvoiceEmail(emailTo, customerName, profile, inv, pdfPath) {
+  const transporter = getEmailTransporter();
+  if (!transporter) throw new Error('SMTP not configured — add SMTP_HOST, SMTP_USER, SMTP_PASS to .env');
+
+  const fromName = process.env.SMTP_FROM || profile.company_name || 'InvoKash';
+  const from     = `"${fromName}" <${process.env.SMTP_USER}>`;
+  const subject  = `Invoice ${inv.invoice_id} from ${profile.company_name}`;
+  const total    = formatAmount(parseFloat(inv.total) || 0, inv.currency || profile.currency);
+
+  // ── Payment / bank details rows ───────────────────────────────────────────
+  const payRow = inv.payment_link
+    ? `<tr><td style="padding:14px 0 0;"><a href="${escHtml(inv.payment_link)}"
+         style="display:inline-block;background:#4f46e5;color:white;padding:13px 28px;
+                text-decoration:none;border-radius:6px;font-weight:bold;font-size:15px;">
+         💳 Pay Now — ${escHtml(total)}</a></td></tr>`
+    : '';
+
+  const bankRow = (profile.bank_name && profile.iban)
+    ? `<tr><td style="padding-top:20px;font-size:13px;color:#666;border-top:1px solid #eee;">
+         🏦 <strong>Bank Transfer</strong><br>
+         Bank: ${escHtml(profile.bank_name)}<br>
+         IBAN / Account: ${escHtml(profile.iban)}<br>
+         ${profile.account_holder ? `Account Holder: ${escHtml(profile.account_holder)}<br>` : ''}
+       </td></tr>`
+    : '';
+
+  const taxRow = (inv.tax_amount && parseFloat(inv.tax_amount) > 0)
+    ? `<tr style="background:#f8f8f8;">
+         <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;">Subtotal</td>
+         <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;text-align:right;">
+           ${escHtml(formatAmount((parseFloat(inv.total) - parseFloat(inv.tax_amount)).toFixed(2), inv.currency || profile.currency))}
+         </td>
+       </tr>
+       <tr>
+         <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;">Tax</td>
+         <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;text-align:right;">
+           ${escHtml(formatAmount(inv.tax_amount, inv.currency || profile.currency))}
+         </td>
+       </tr>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:20px;background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;color:#333;">
+<div style="max-width:560px;margin:0 auto;">
+
+  <!-- Header -->
+  <div style="background:#1e3a5f;color:white;padding:24px 28px;border-radius:8px 8px 0 0;">
+    <p style="margin:0 0 4px;font-size:12px;opacity:.7;letter-spacing:1px;">INVOICE</p>
+    <h1 style="margin:0;font-size:20px;font-weight:700;">${escHtml(profile.company_name)}</h1>
+  </div>
+
+  <!-- Body -->
+  <div style="background:#ffffff;padding:28px;border:1px solid #dde1e7;border-top:none;">
+    <p style="font-size:15px;margin:0 0 20px;">
+      Hello <strong>${escHtml(customerName)}</strong>,<br>
+      <span style="color:#555;font-size:14px;">Please find your invoice attached to this email.</span>
+    </p>
+
+    <!-- Invoice table -->
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border-collapse:collapse;border:1px solid #e8e8e8;border-radius:6px;overflow:hidden;font-size:14px;">
+      <tr style="background:#1e3a5f;color:white;">
+        <td style="padding:10px 12px;font-weight:600;">Invoice ID</td>
+        <td style="padding:10px 12px;text-align:right;">${escHtml(inv.invoice_id)}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;">Date</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;text-align:right;">${escHtml(inv.date || '')}</td>
+      </tr>
+      <tr style="background:#f8f8f8;">
+        <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;">Description</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e8e8e8;text-align:right;">${escHtml(inv.service || '-')}</td>
+      </tr>
+      ${taxRow}
+      <tr>
+        <td style="padding:12px;font-weight:700;font-size:15px;">Total Due</td>
+        <td style="padding:12px;font-weight:700;font-size:18px;color:#1e3a5f;text-align:right;">${escHtml(total)}</td>
+      </tr>
+    </table>
+
+    <!-- Pay button or bank details -->
+    <table width="100%" cellpadding="0" cellspacing="0">
+      ${payRow}
+      ${bankRow}
+    </table>
+
+    <p style="font-size:13px;color:#999;margin:24px 0 0;">
+      Questions? Reply to this email or contact <strong>${escHtml(profile.company_name)}</strong> directly.
+    </p>
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#e8eaed;padding:12px 28px;border-radius:0 0 8px 8px;
+              font-size:11px;color:#999;text-align:center;">
+    Sent via InvoKash &nbsp;·&nbsp; AI Invoice Management
+  </div>
+</div>
+</body></html>`;
+
+  const text = [
+    `Hello ${customerName},`,
+    ``,
+    `Please find invoice ${inv.invoice_id} from ${profile.company_name} attached.`,
+    ``,
+    `Invoice ID:  ${inv.invoice_id}`,
+    `Date:        ${inv.date || ''}`,
+    `Description: ${inv.service || '-'}`,
+    `Total Due:   ${total}`,
+    inv.payment_link ? `\nPay online: ${inv.payment_link}` : '',
+    profile.bank_name ? `\nBank Transfer:\n  Bank: ${profile.bank_name}\n  IBAN: ${profile.iban}` : '',
+    `\nThank you for your business!\n${profile.company_name}`,
+  ].filter(l => l !== undefined).join('\n');
+
+  const attachments = (pdfPath && fs.existsSync(pdfPath))
+    ? [{ filename: `${inv.invoice_id}.pdf`, path: pdfPath }]
+    : [];
+
+  // CC the business owner — prefer email captured in their profile, fall back to SMTP_USER
+  const ccAddress = profile.owner_email || process.env.SMTP_USER;
+  const info = await transporter.sendMail({ from, to: emailTo, cc: ccAddress, subject, text, html, attachments });
+  return info;
 }
 
 // ─── Recurring Invoices ────────────────────────────────────────────────────────
@@ -1671,7 +1934,8 @@ module.exports = {
   generateBusinessInsights,
   // Business logic
   processInvoiceText, confirmInvoice, markInvoicePaid, calculateStats,
-  buildDownloadZip,
+  buildDownloadZip, buildExpenseZip,
+  generateExpenseCSV,
   // v2.1 features
   getLastInvoiceForCustomer,
   getAgingReport,
@@ -1683,6 +1947,7 @@ module.exports = {
   addService, getServices, deleteService,
   createQuote, getQuotes, convertQuoteToInvoice,
   saveClientWhatsApp, getClientWhatsApp, listClients, deleteClient,
+  saveClientEmail, getClientEmail, sendInvoiceEmail,
   createRecurring, getRecurring, pauseRecurring, deleteRecurring, processRecurringInvoices,
   recordPartialPayment, getInvoicePayments,
   generateTaxReport,
