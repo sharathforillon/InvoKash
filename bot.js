@@ -17,7 +17,7 @@ const {
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, calculateStats,
   classifyIntent, transcribeAudio, processInvoiceText, confirmInvoice,
-  markInvoicePaid, buildDownloadZip, buildExpenseZip, saveData,
+  markInvoicePaid, buildDownloadZip, buildExpenseZip, generateExpenseExcel, saveData,
   getLastInvoiceForCustomer, getAgingReport,
   setRevenueGoal, getRevenueGoal,
   generateBusinessInsights, generateClientStatement,
@@ -991,13 +991,14 @@ function showExpenseDownloadPicker(chatId, userId) {
     );
   }
   send(chatId,
-    `📥 *Download Expenses*\n` +
+    `📊 *Download Expenses*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `Which period do you need?\n\n` +
-    `_You'll get a ZIP with:_\n` +
-    `• \`expenses.csv\` — ready to share with your accountant\n` +
-    `• \`receipts/\` folder — all scanned receipts matched by row\n\n` +
-    `_Columns: Date · Description · Merchant · Category · Amount · Currency · Tax Amount · Deductible · Receipt File_`,
+    `_You'll receive an Excel (.xlsx) file with:_\n` +
+    `• All expense rows with amounts, categories & dates\n` +
+    `• 📸 Receipt images embedded directly in each row\n` +
+    `• Tax Amount & Deductible columns for your accountant\n\n` +
+    `_Open in Excel, Numbers, or Google Sheets_`,
     { reply_markup: { inline_keyboard: [
       [{ text: '📅 This Month',    callback_data: 'exp_dl_this_month'   }],
       [{ text: '📅 Last Month',    callback_data: 'exp_dl_last_month'   }],
@@ -1008,7 +1009,7 @@ function showExpenseDownloadPicker(chatId, userId) {
   );
 }
 
-// ─── Expense Export (CSV + receipts ZIP) for a specific period ───────────────
+// ─── Expense Export (Excel with embedded images) for a specific period ────────
 async function downloadExpenses(chatId, userId, period = 'all') {
   try {
     const result = await buildExpenseZip(userId, period);
@@ -1024,37 +1025,40 @@ async function downloadExpenses(chatId, userId, period = 'all') {
       return send(chatId,
         `📭 No expenses found for *${PERIOD_NAMES[period] || period}*.\n\nTry a different period or choose All Time.`,
         { reply_markup: { inline_keyboard: [
-          [{ text: '📥 Pick Different Period', callback_data: 'nav_export_expenses' }],
+          [{ text: '📊 Pick Different Period', callback_data: 'nav_export_expenses' }],
           [{ text: '📋 All Expenses',          callback_data: 'nav_expenses'        }],
         ]}}
       );
     }
 
-    const { zipPath, count, total, receiptCount: rc, currency, periodName } = result;
+    const { zipPath: xlsxPath, count, total, receiptCount: rc, currency, periodName } = result;
 
-    await send(chatId, `⏳ _Preparing ${count} expense${count !== 1 ? 's' : ''}${rc > 0 ? ` + ${rc} receipt${rc > 1 ? 's' : ''}` : ''}…_`);
+    await send(chatId, `⏳ _Building Excel report — ${count} expense${count !== 1 ? 's' : ''}${rc > 0 ? ` with ${rc} embedded receipt${rc > 1 ? 's' : ''}` : ''}…_`);
 
-    let caption = `📦 *Expense Export — ${periodName}*\n`;
+    let caption = `📊 *Expense Report — ${periodName}*\n`;
     caption += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    caption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  ${formatAmount(total, currency)}\n`;
-    if (rc > 0) caption += `📸 ${rc} receipt file${rc !== 1 ? 's' : ''} included\n`;
+    caption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  *${formatAmount(total, currency)}*\n`;
+    if (rc > 0) caption += `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} embedded in the Receipt column\n`;
     caption += `\n*How to use with your accountant:*\n`;
-    caption += `1️⃣ Open \`expenses.csv\` in Excel or Numbers\n`;
+    caption += `1️⃣ Open in Excel, Numbers, or Google Sheets\n`;
     caption += `2️⃣ Fill the *Tax Amount* column with input VAT/GST you can reclaim\n`;
     caption += `3️⃣ Mark *Deductible* as NO for any personal items\n`;
-    if (rc > 0) caption += `4️⃣ The \`receipts/\` folder matches each row by *Receipt File* column\n`;
+    if (rc > 0) caption += `4️⃣ Receipt images are embedded — scroll right to the Receipt column\n`;
     caption += `\n_Each row has a unique Expense ID for audit trail._`;
 
-    await bot.sendDocument(chatId, zipPath, { caption, parse_mode: 'Markdown',
+    await bot.sendDocument(chatId, xlsxPath, {
+      caption,
+      parse_mode: 'Markdown',
+      filename: `InvoKash_Expenses_${periodName.replace(/\s+/g, '_')}.xlsx`,
       reply_markup: { inline_keyboard: [
-        [{ text: '📥 Download Another Period', callback_data: 'nav_export_expenses' }],
+        [{ text: '📊 Download Another Period', callback_data: 'nav_export_expenses' }],
         [{ text: '📋 All Expenses',            callback_data: 'nav_expenses'        }],
       ]}
     });
-    try { fs.unlinkSync(zipPath); } catch (_) {}
+    try { fs.unlinkSync(xlsxPath); } catch (_) {}
   } catch (err) {
     console.error('Expense export error:', err.message);
-    send(chatId, '⚠️ Error creating expense export. Please try again.');
+    send(chatId, '⚠️ Error creating expense report. Please try again.');
   }
 }
 

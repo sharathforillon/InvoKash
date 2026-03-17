@@ -20,6 +20,7 @@
     "archiver": "^7.0.1",
     "axios": "^1.13.5",
     "dotenv": "^17.2.4",
+    "exceljs": "^4.4.0",
     "express": "^4.19.2",
     "form-data": "^4.0.5",
     "node-telegram-bot-api": "^0.67.0",

@@ -254,41 +254,118 @@ function generateCSV(invoices) {
   return csv;
 }
 
-// ─── Expense CSV ──────────────────────────────────────────────────────────────
-function generateExpenseCSV(expenses, fallbackCurrency = '') {
-  const esc = (v) => {
-    if (v == null) return '';
-    const s = String(v).replace(/"/g, '""');
-    return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s}"` : s;
-  };
-  // Columns designed for tax reconciliation:
-  // Expense ID  — unique ref for audit trail
-  // Date        — DD/MM/YYYY as recorded
-  // Description — what was purchased
-  // Merchant    — supplier name (from receipt scan)
-  // Category    — maps to deductible category
-  // Amount      — net amount
-  // Currency    — for multi-currency books
-  // Tax Amount  — pre-filled 0.00; accountant fills actual input tax
-  // Deductible  — YES for all logged expenses (accountant adjusts as needed)
-  // Receipt     — filename in the receipts/ folder; blank = no receipt
-  let csv = 'Expense ID,Date,Description,Merchant,Category,Amount,Currency,Tax Amount,Deductible,Receipt File\n';
-  expenses.forEach(exp => {
-    const receiptFile = exp.receipt_path ? path.basename(exp.receipt_path) : '';
-    csv += [
-      esc(exp.id || ''),
-      esc(exp.date),
-      esc(exp.description),
-      esc(exp.merchant || ''),
-      esc(exp.category),
-      esc((parseFloat(exp.amount) || 0).toFixed(2)),
-      esc(exp.currency || fallbackCurrency),
-      esc('0.00'),        // Tax Amount — accountant fills input VAT/GST reclaim
-      esc('YES'),         // Deductible — default YES; accountant marks exceptions
-      esc(receiptFile),
-    ].join(',') + '\n';
+// ─── Expense Excel (images embedded in Receipt column) ────────────────────────
+async function generateExpenseExcel(expenses, fallbackCurrency = '') {
+  const ExcelJS = require('exceljs');
+  const wb = new ExcelJS.Workbook();
+  wb.creator  = 'InvoKash';
+  wb.created  = new Date();
+
+  const ws = wb.addWorksheet('Expenses', {
+    views:     [{ state: 'frozen', ySplit: 1 }],
+    pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1 },
   });
-  return csv;
+
+  // ── Column definitions ──────────────────────────────────────────────────────
+  ws.columns = [
+    { header: 'Expense ID',  key: 'id',          width: 18 },
+    { header: 'Date',        key: 'date',         width: 12 },
+    { header: 'Description', key: 'description',  width: 32 },
+    { header: 'Merchant',    key: 'merchant',     width: 22 },
+    { header: 'Category',    key: 'category',     width: 18 },
+    { header: 'Amount',      key: 'amount',       width: 14 },
+    { header: 'Currency',    key: 'currency',     width: 10 },
+    { header: 'Tax Amount',  key: 'tax',          width: 13 },
+    { header: 'Deductible',  key: 'deductible',   width: 12 },
+    { header: 'Receipt',     key: 'receipt',      width: 22 },
+  ];
+
+  // ── Style the header row ────────────────────────────────────────────────────
+  const headerRow  = ws.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell(cell => {
+    cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
+    cell.border    = { bottom: { style: 'thin', color: { argb: 'FF6366F1' } } };
+  });
+
+  // ── Data rows ───────────────────────────────────────────────────────────────
+  for (let i = 0; i < expenses.length; i++) {
+    const exp       = expenses[i];
+    const excelRow  = i + 2; // row 1 = header
+    const hasImage  = !!(exp.receipt_path && fs.existsSync(exp.receipt_path));
+    const rowHeight = hasImage ? 72 : 18;
+
+    const row = ws.addRow({
+      id:         exp.id || '',
+      date:       exp.date || '',
+      description: exp.description || '',
+      merchant:   exp.merchant || '',
+      category:   exp.category || '',
+      amount:     parseFloat(exp.amount) || 0,
+      currency:   exp.currency || fallbackCurrency,
+      tax:        0.00,
+      deductible: 'YES',
+      receipt:    hasImage ? '' : '',   // text cleared; image takes over when present
+    });
+    row.height = rowHeight;
+
+    // Alternate row background
+    const bgColor = i % 2 === 0 ? 'FFF8F9FA' : 'FFFFFFFF';
+    row.eachCell({ includeEmpty: true }, cell => {
+      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } };
+      cell.alignment = { vertical: 'middle', wrapText: true };
+      cell.font      = { size: 10 };
+    });
+
+    // Format Amount and Tax as numbers
+    row.getCell('amount').numFmt = '#,##0.00';
+    row.getCell('tax').numFmt    = '#,##0.00';
+
+    // ── Embed receipt image ─────────────────────────────────────────────────
+    if (hasImage) {
+      try {
+        const extRaw = path.extname(exp.receipt_path).slice(1).toLowerCase();
+        // ExcelJS only accepts jpeg, png, gif, bmp
+        const extMap = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', bmp: 'bmp' };
+        const ext    = extMap[extRaw];
+        if (ext) {
+          const imgBuf  = fs.readFileSync(exp.receipt_path);
+          const imageId = wb.addImage({ buffer: imgBuf, extension: ext });
+          // tl/br are 0-indexed: col 9 = column J (Receipt), row = excelRow - 1 (0-indexed)
+          ws.addImage(imageId, {
+            tl:     { col: 9.05, row: excelRow - 1 + 0.05 },
+            ext:    { width: 140, height: 68 },
+            editAs: 'oneCell',
+          });
+        } else {
+          // Unsupported format (HEIC etc) — show filename text instead
+          row.getCell('receipt').value = path.basename(exp.receipt_path);
+        }
+      } catch (_) {
+        row.getCell('receipt').value = path.basename(exp.receipt_path);
+      }
+    }
+  }
+
+  // ── Summary row ─────────────────────────────────────────────────────────────
+  const summaryRow = ws.addRow({});
+  summaryRow.height = 20;
+  const totalAmt = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  summaryRow.getCell('description').value = `TOTAL — ${expenses.length} expense${expenses.length !== 1 ? 's' : ''}`;
+  summaryRow.getCell('description').font  = { bold: true, size: 10 };
+  summaryRow.getCell('amount').value      = totalAmt;
+  summaryRow.getCell('amount').numFmt     = '#,##0.00';
+  summaryRow.getCell('amount').font       = { bold: true, size: 10 };
+  summaryRow.getCell('currency').value    = fallbackCurrency;
+  summaryRow.eachCell({ includeEmpty: true }, cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEBF0FF' } };
+  });
+
+  const xlsxPath = `/tmp/expenses_${Date.now()}.xlsx`;
+  await wb.xlsx.writeFile(xlsxPath);
+  return xlsxPath;
 }
 
 // ─── AI: Intent Classification (with caching for cost savings) ────────────────
@@ -822,7 +899,7 @@ async function buildDownloadZip(userId, period) {
   return { zipPath, filtered, stats, currency };
 }
 
-// ─── Expense Download ZIP (expenses.csv + all receipt files) ──────────────────
+// ─── Expense Download Excel (images embedded — no zip needed) ─────────────────
 async function buildExpenseZip(userId, period = 'all') {
   const allExpenses = expenseHistory[userId] || [];
   if (allExpenses.length === 0) return null;
@@ -830,39 +907,21 @@ async function buildExpenseZip(userId, period = 'all') {
   // Filter by period, then sort oldest-first (accountant-friendly)
   const periodFiltered = period === 'all'
     ? allExpenses.slice()
-    : filterInvoicesByPeriod(allExpenses, period);   // works for any array with a date field
+    : filterInvoicesByPeriod(allExpenses, period);
 
   if (periodFiltered.length === 0) return { empty: true, period };
 
   const sorted   = periodFiltered.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-  const ts       = Date.now();
-  const zipPath  = `/tmp/expenses_${userId}_${ts}.zip`;
-  const csvPath  = `/tmp/expenses_${userId}_${ts}.csv`;
   const currency = companyProfiles[userId]?.currency || 'AED';
 
-  fs.writeFileSync(csvPath, generateExpenseCSV(sorted, currency));
-
-  await new Promise((resolve, reject) => {
-    const output  = fs.createWriteStream(zipPath);
-    const archive = archiver('zip', { zlib: { level: 7 } });
-    output.on('close', resolve);
-    archive.on('error', reject);
-    archive.pipe(output);
-    archive.file(csvPath, { name: 'expenses.csv' });
-    sorted.forEach(exp => {
-      if (exp.receipt_path && fs.existsSync(exp.receipt_path)) {
-        archive.file(exp.receipt_path, { name: `receipts/${path.basename(exp.receipt_path)}` });
-      }
-    });
-    archive.finalize();
-  });
-
-  try { fs.unlinkSync(csvPath); } catch (_) {}
+  // Generate Excel with embedded receipt images
+  const xlsxPath = await generateExpenseExcel(sorted, currency);
 
   const total        = sorted.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   const receiptCount = sorted.filter(e => e.receipt_path && fs.existsSync(e.receipt_path)).length;
   const periodName   = PERIOD_NAMES[period] || 'All Time';
-  return { zipPath, count: sorted.length, total, receiptCount, currency, period, periodName };
+  // Keep key name as zipPath for backward compat with bot.js — points to xlsx now
+  return { zipPath: xlsxPath, count: sorted.length, total, receiptCount, currency, period, periodName };
 }
 
 // ─── Quick Re-Invoice ─────────────────────────────────────────────────────────
@@ -1947,7 +2006,7 @@ module.exports = {
   // Business logic
   processInvoiceText, confirmInvoice, markInvoicePaid, calculateStats,
   buildDownloadZip, buildExpenseZip,
-  generateExpenseCSV,
+  generateExpenseExcel,
   // v2.1 features
   getLastInvoiceForCustomer,
   getAgingReport,
