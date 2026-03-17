@@ -5,12 +5,13 @@
  */
 
 require('dotenv').config();
-const axios     = require('axios');
+const axios       = require('axios');
 const PDFDocument = require('pdfkit');
-const fs        = require('fs');
-const path      = require('path');
-const archiver  = require('archiver');
-const OpenAI    = require('openai');
+const fs          = require('fs');
+const path        = require('path');
+const archiver    = require('archiver');
+const OpenAI      = require('openai');
+const ExcelJS     = require('exceljs');
 // Lazily initialize Stripe only when a key is available
 let _stripe = null;
 function getStripe() {
@@ -256,7 +257,6 @@ function generateCSV(invoices) {
 
 // ─── Expense Excel (images embedded in Receipt column) ────────────────────────
 async function generateExpenseExcel(expenses, fallbackCurrency = '') {
-  const ExcelJS = require('exceljs');
   const wb = new ExcelJS.Workbook();
   wb.creator  = 'InvoKash';
   wb.created  = new Date();
