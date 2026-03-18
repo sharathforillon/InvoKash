@@ -380,7 +380,12 @@ function quickClassify(text) {
   if (/\b(profile|settings?|account)\b/i.test(t)) return 'profile';
   if (/\b(customer|client)s?\b/i.test(t) && !/\bfor\b.*\d/.test(t)) return 'customers';
 
-  // ── Expense patterns — must come BEFORE invoice patterns ──────────────────
+  // ── Explicit invoice/expense commands (highest confidence) ──────────────────
+  // Voice users naturally say "generate an invoice for..." — catch before AI
+  if (/\b(generate|create|make|send|write|prepare)\s+(an?\s+)?(invoice|bill)\b/i.test(t)) return 'invoice';
+  if (/\b(log|add|record|track)\s+(an?\s+)?(expense|cost|payment)\b/i.test(t)) return 'expense';
+
+  // ── Expense patterns — must come BEFORE invoice currency patterns ──────────
   // Catches: "spent 200 on lunch", "bought coffee 15", "paid for parking 50",
   //          "office rent 3000", "travel 200", "petrol 80", "food 45",
   //          "subscription 99", "equipment 500", "salary 5000", "utilities 300"
@@ -391,9 +396,12 @@ function quickClassify(text) {
   if (/\b(utility|utilities|electric|electricity|water|internet|phone|mobile|insurance|maintenance|repair[s]?)\b/i.test(t) && /\d/.test(t)) return 'expense';
   if (/\b(travel|hotel|accommodation|flight|airfare|train|bus|marketing|advertising|ad[s]?\s+spend)\b/i.test(t) && /\d/.test(t)) return 'expense';
 
-  // Invoice pattern: "service for ClientName, 5000" or "service for client for amount"
+  // ── Invoice patterns ────────────────────────────────────────────────────────
+  // "service for ClientName, 5000" or "service for client for amount"
   if (/for\s+\S+.*\s+for\s+[\d,]+(\.\d+)?/i.test(t)) return 'invoice';
+  // Currency code (AED, USD…) or spoken name (dirham, dollar, euro…) with a number
   if (/\d+(\.\d+)?\s*(aed|usd|eur|gbp|inr|sar|omr|kwd|qar|bhd|sgd|cad|aud|egp|دولار|درهم)/i.test(t)) return 'invoice';
+  if (/\d+(\.\d+)?\s*(dirham|dirhams|dollar|dollars|euro|euros|pound|pounds|rupee|rupees|riyal|riyals|dinar|dinars|franc|francs)\b/i.test(t)) return 'invoice';
   return null; // needs AI
 }
 

@@ -1167,7 +1167,7 @@ async function handleVoiceMessage(chatId, userId, voice, firstName) {
     }
 
     transcribedText = sanitizeInput(transcribedText);
-    await send(chatId, `🎤 _"${transcribedText}"_\n\n⚡ Building your invoice...`);
+    await send(chatId, `🎤 _"${transcribedText}"_\n\n⚡ On it...`);
     await handleTextMessage(chatId, userId, transcribedText, firstName);
 
   } catch (err) {
