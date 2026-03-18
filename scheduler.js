@@ -6,7 +6,7 @@
  * Skips already-paid invoices and avoids duplicate alerts (tracked per session)
  */
 
-const { invoiceHistory, companyProfiles, formatAmount, getClientWhatsApp, processRecurringInvoices } = require('./core');
+const { invoiceHistory, companyProfiles, formatAmount, getClientWhatsApp, processRecurringInvoices, saveData } = require('./core');
 
 // Track which invoices have already been notified this session
 // (avoids re-pinging on every restart)
@@ -33,12 +33,16 @@ function initScheduler(telegramNotifyFn, waSendFn = null) {
 }
 
 async function runOverdueCheck() {
-  const now  = new Date();
+  const now   = new Date();
+  const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
   const MILESTONES = [7, 14, 30, 60]; // days
 
   for (const [userId, invs] of Object.entries(invoiceHistory)) {
     const profile = companyProfiles[userId];
     if (!profile) continue;
+
+    // Skip users already reminded today (they saw it when they opened the bot)
+    if (profile.lastReminderDate === today) continue;
 
     const overdue = invs.filter(inv => {
       if (inv.status === 'paid') return false;
@@ -70,6 +74,10 @@ async function runOverdueCheck() {
         `💰 Amount: *${formatAmount(inv.total, inv.currency || profile.currency)}*\n` +
         `📅 Issued: ${inv.date}\n\n` +
         `${urgency}`;
+
+      // Mark this user as reminded today (prevents bot open from doubling up)
+      profile.lastReminderDate = today;
+      saveData();
 
       // ── Telegram notification ─────────────────────────────────────────────
       if (_telegramNotify && /^\d+$/.test(userId)) {

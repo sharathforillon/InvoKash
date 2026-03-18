@@ -248,11 +248,6 @@ function showWelcome(chatId, userId, firstName = 'there') {
       msg += `_${formatAmount(monthStats.total, profile.currency)} of ${formatAmount(goal.monthly, profile.currency)}_\n`;
     }
 
-    // Urgency banner
-    if (overdueCount > 0) {
-      msg += `\n🔴 *${overdueCount} overdue* — tap ⚙️ More → Aging`;
-    }
-
     msg += `\n\n_Type or 🎤 speak to create an invoice_`;
   }
 
@@ -275,6 +270,49 @@ function showWelcome(chatId, userId, firstName = 'there') {
       ],
     ]}
   });
+
+  // ── Once-per-day overdue digest ──────────────────────────────────────────────
+  // Show after the home message only on the user's first visit of the day.
+  // The scheduler also checks this flag so it won't double-up.
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  if (history.length > 0 && profile.lastReminderDate !== today && overdueCount > 0) {
+    profile.lastReminderDate = today;
+    saveData();
+
+    const overdueInvs = history.filter(inv => {
+      if (inv.status === 'paid') return false;
+      const parts = inv.date?.split('/');
+      if (!parts || parts.length < 3) return false;
+      const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+      return Math.floor((Date.now() - d.getTime()) / 86400000) > 7;
+    }).sort((a, b) => {
+      // Sort by age descending (oldest first)
+      const daysA = Math.floor((Date.now() - new Date(a.date.split('/').reverse().join('-')).getTime()) / 86400000);
+      const daysB = Math.floor((Date.now() - new Date(b.date.split('/').reverse().join('-')).getTime()) / 86400000);
+      return daysB - daysA;
+    });
+
+    let reminderMsg = `⏰ *Daily Payment Reminder*\n`;
+    reminderMsg += `━━━━━━━━━━━━━━━━━━━\n\n`;
+    reminderMsg += `${overdueCount} unpaid invoice${overdueCount > 1 ? 's' : ''} need attention:\n\n`;
+
+    overdueInvs.slice(0, 4).forEach(inv => {
+      const parts = inv.date.split('/');
+      const d     = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+      const days  = Math.floor((Date.now() - d.getTime()) / 86400000);
+      const icon  = days >= 30 ? '🔴' : days >= 14 ? '🟠' : '🟡';
+      reminderMsg += `${icon} *${inv.customer_name}*  ${formatAmount(inv.total, inv.currency || profile.currency)}  _(${days}d)_\n`;
+    });
+    if (overdueCount > 4) reminderMsg += `_…and ${overdueCount - 4} more_\n`;
+
+    // Slight delay so home message appears first
+    setTimeout(() => send(chatId, reminderMsg, {
+      reply_markup: { inline_keyboard: [
+        [{ text: '⏱ View Aging Report', callback_data: 'nav_aging' }],
+        [{ text: '✕ Dismiss',           callback_data: 'nav_home'  }],
+      ]}
+    }), 800);
+  }
 }
 
 // ─── Export Picker ─────────────────────────────────────────────────────────────
