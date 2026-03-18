@@ -250,48 +250,81 @@ function showWelcome(chatId, userId, firstName = 'there') {
 
     // Urgency banner
     if (overdueCount > 0) {
-      msg += `\n🔴 *${overdueCount} overdue invoice${overdueCount > 1 ? 's' : ''} need attention* → Aging`;
+      msg += `\n🔴 *${overdueCount} overdue* — tap ⚙️ More → Aging`;
     }
 
-    msg += `\n\n💬 _Type or 🎤 speak to create a new invoice_`;
+    msg += `\n\n_Type or 🎤 speak to create an invoice_`;
   }
 
   // Pin the quick-action keyboard once per session
   ensureMainKeyboard(chatId, userId);
 
-  // Home screen: primary actions first, then navigation
+  // Clean 3-tier home: pinned keyboard handles primary actions
   send(chatId, msg, {
     reply_markup: { inline_keyboard: [
-      // Primary actions - always first
       [
-        { text: '📄 New Invoice',  callback_data: 'nav_new_invoice' },
-        { text: '💸 Log Expense',  callback_data: 'nav_log_expense' },
-      ],
-      // Tier 1 - Most used daily
-      [
-        { text: '📋 Invoices',    callback_data: 'nav_invoices'  },
-        { text: '👥 Clients',     callback_data: 'nav_customers' },
-      ],
-      // Tier 2 - Financial intelligence
-      [
-        { text: '📊 Stats',       callback_data: 'nav_stats'     },
-        { text: '📈 P&L',         callback_data: 'nav_profit'    },
+        { text: '📋 Invoices',  callback_data: 'nav_invoices'  },
+        { text: '👥 Clients',   callback_data: 'nav_customers' },
       ],
       [
-        { text: '⏱ Aging',       callback_data: 'nav_aging'     },
-        { text: '🎯 Goal',        callback_data: 'nav_goal'      },
-      ],
-      // Tier 3 - Tools
-      [
-        { text: '📌 Templates',   callback_data: 'nav_templates' },
-        { text: '🔄 Recurring',   callback_data: 'nav_recurring' },
+        { text: '📊 Stats',     callback_data: 'nav_stats'     },
+        { text: '📥 Export',    callback_data: 'nav_export'    },
       ],
       [
-        { text: '👤 Profile',     callback_data: 'nav_profile'   },
-        { text: '📥 Export',      callback_data: 'nav_download'  },
+        { text: '⚙️ More',      callback_data: 'nav_more'      },
       ],
     ]}
   });
+}
+
+// ─── Export Picker ─────────────────────────────────────────────────────────────
+function showExportPicker(chatId) {
+  send(chatId,
+    `📥 *Export*\n\nWhat would you like to download?`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '📄 Export Invoices',  callback_data: 'export_invoices' }],
+      [{ text: '💸 Export Expenses',  callback_data: 'export_expenses' }],
+      [{ text: '📦 Export Both',      callback_data: 'export_both'     }],
+      [{ text: '🏠 Home',             callback_data: 'nav_home'        }],
+    ]}}
+  );
+}
+
+// ─── Export Both — period picker ───────────────────────────────────────────────
+function showBothExportPicker(chatId) {
+  send(chatId,
+    `📦 *Export Both*\n\nWhich period?\n\n_You'll receive the invoice ZIP and the expense Excel + receipts ZIP._`,
+    { reply_markup: { inline_keyboard: [
+      [{ text: '📅 This Month',    callback_data: 'both_dl_this_month'   }],
+      [{ text: '📅 Last Month',    callback_data: 'both_dl_last_month'   }],
+      [{ text: '📅 This Quarter',  callback_data: 'both_dl_this_quarter' }],
+      [{ text: '📅 This Year',     callback_data: 'both_dl_this_year'    }],
+      [{ text: '📦 All Time',      callback_data: 'both_dl_all'          }],
+      [{ text: '← Back',           callback_data: 'nav_export'           }],
+    ]}}
+  );
+}
+
+// ─── More Drawer ───────────────────────────────────────────────────────────────
+function showMoreMenu(chatId) {
+  send(chatId,
+    `⚙️ *More*`,
+    { reply_markup: { inline_keyboard: [
+      [
+        { text: '📈 P&L',        callback_data: 'nav_profit'    },
+        { text: '⏱ Aging',      callback_data: 'nav_aging'     },
+      ],
+      [
+        { text: '🎯 Goal',       callback_data: 'nav_goal'      },
+        { text: '📌 Templates',  callback_data: 'nav_templates' },
+      ],
+      [
+        { text: '🔄 Recurring',  callback_data: 'nav_recurring' },
+        { text: '👤 Profile',    callback_data: 'nav_profile'   },
+      ],
+      [{ text: '🏠 Home',        callback_data: 'nav_home'      }],
+    ]}}
+  );
 }
 
 // ─── Help ─────────────────────────────────────────────────────────────────────
@@ -2777,7 +2810,7 @@ function startTelegramBot() {
       else if (data === 'nav_stats')         showPeriodSelector(chatId, userId, 'stats');
       else if (data === 'nav_profile')       showProfile(chatId, userId);
       else if (data === 'nav_download')      showPeriodSelector(chatId, userId, 'download');
-      else if (data === 'nav_customers')     showCustomers(chatId, userId); // "Clients" in UI
+      else if (data === 'nav_customers')     showCustomers(chatId, userId);
       else if (data === 'nav_aging')         showAgingDashboard(chatId, userId);
       else if (data === 'nav_goal')          showGoalSetter(chatId, userId);
       else if (data === 'nav_templates')     showTemplates(chatId, userId);
@@ -2785,6 +2818,17 @@ function startTelegramBot() {
       else if (data === 'nav_export_expenses')   showExpenseDownloadPicker(chatId, userId);
       else if (data.startsWith('exp_dl_'))       downloadExpenses(chatId, userId, data.replace('exp_dl_', ''));
       else if (data === 'nav_profit')            showProfitLoss(chatId, userId, 'this_month');
+      // ── New export / more drawer ────────────────────────────────────────────
+      else if (data === 'nav_export')            showExportPicker(chatId);
+      else if (data === 'nav_more')              showMoreMenu(chatId);
+      else if (data === 'export_invoices')       showPeriodSelector(chatId, userId, 'download');
+      else if (data === 'export_expenses')       showExpenseDownloadPicker(chatId, userId);
+      else if (data === 'export_both')           showBothExportPicker(chatId);
+      else if (data.startsWith('both_dl_')) {
+        const period = data.replace('both_dl_', '');
+        await downloadInvoices(chatId, userId, period);
+        await downloadExpenses(chatId, userId, period);
+      }
       else if (data === 'nav_statement')     selectClientForStatement(chatId, userId);
       // v2.2 nav
       else if (data === 'nav_services')      showServices(chatId, userId);
