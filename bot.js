@@ -1247,7 +1247,8 @@ async function handleTextMessage(chatId, userId, text, firstName) {
   // Catches keywords BEFORE the AI classifier sees the text, preventing misclassification
   const expenseKeywords = /\b(spent|expense[d]?|paid\s+for|cost[s]?|bought|purchase[d]?|rent|petrol|fuel|gas|grocery|groceries|food|lunch|dinner|breakfast|coffee|meal|transport|taxi|uber|parking|toll|subscription|supplies|stationery|salary|wage[s]?|payroll|utility|utilities|electric|electricity|internet|insurance|maintenance|repair[s]?|travel|hotel|flight|airfare|marketing|advertising)\b/i;
   if (expenseKeywords.test(lower) && /\d/.test(lower)) {
-    if (commandState[userId]?.type === 'expense_confirm') return; // handled elsewhere
+    // If a previous expense preview is pending, abandon it — user is describing a new one
+    if (commandState[userId]?.type === 'expense_confirm') delete commandState[userId];
     return handleExpenseEntry(chatId, userId, text);
   }
 
@@ -1276,8 +1277,12 @@ async function handleTextMessage(chatId, userId, text, firstName) {
   const intent = await classifyIntent(text);
 
   if (intent === 'invoice') {
+    // Abandon any pending expense preview — user is starting something new
+    if (commandState[userId]?.type === 'expense_confirm') delete commandState[userId];
     await handleInvoiceRequest(chatId, userId, sanitizeInput(text));
   } else if (intent === 'expense') {
+    // Abandon any pending expense preview — user is describing a new one
+    if (commandState[userId]?.type === 'expense_confirm') delete commandState[userId];
     await handleExpenseEntry(chatId, userId, sanitizeInput(text));
   } else if (intent === 'greeting' || intent === 'help') {
     showWelcome(chatId, userId, firstName);
