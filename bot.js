@@ -151,8 +151,7 @@ function showInvoicePrompt(chatId, userId) {
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
   commandState[userId] = { type: 'expect_invoice' };
   send(chatId,
-    `📄 *Create Invoice*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📄 *Create Invoice*\n\n` +
     `Just describe what you\'re billing:\n\n` +
     `_"Website design for Ahmed, 5,000"_\n` +
     `_"3 months consulting for TechCorp, 2,500 each"_\n` +
@@ -171,8 +170,7 @@ function showExpensePrompt(chatId, userId) {
   if (!companyProfiles[userId]) return send(chatId, '⚠️ Please set up your profile first with /setup.');
   commandState[userId] = { type: 'expect_expense' };
   send(chatId,
-    `💸 *Log Expense*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `💸 *Log Expense*\n\n` +
     `*Type it:*\n` +
     `_"Spent 250 on Adobe subscription"_\n` +
     `_"Flight to Dubai 850"_\n` +
@@ -1065,8 +1063,7 @@ function showExpenseDownloadPicker(chatId, userId) {
     );
   }
   send(chatId,
-    `📊 *Download Expenses*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📊 *Download Expenses*\n\n` +
     `Which period do you need?\n\n` +
     `_You'll receive an Excel (.xlsx) file with:_\n` +
     `• All expense rows with amounts, categories & dates\n` +
@@ -1114,7 +1111,7 @@ async function downloadExpenses(chatId, userId, period = 'all') {
 
     // ── File 1: Excel spreadsheet ──────────────────────────────────────────────
     let xlsxCaption = `📊 *Expense Report — ${periodName}*\n`;
-    xlsxCaption += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    xlsxCaption += `━━━━━━━━━━━━━━━━━━━\n`;
     xlsxCaption += `💸 ${count} expense${count !== 1 ? 's' : ''}  ·  *${formatAmount(total, currency)}*\n`;
     if (rc > 0) xlsxCaption += `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} embedded in the Receipt column\n`;
     xlsxCaption += `\n*Accountant checklist:*\n`;
@@ -1133,7 +1130,7 @@ async function downloadExpenses(chatId, userId, period = 'all') {
     if (receiptsZipPath) {
       const zipCaption =
         `📁 *Receipts — ${periodName}*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
         `📸 ${rc} receipt image${rc !== 1 ? 's' : ''} organised by category\n\n` +
         `_Folders: Travel · Office · Software · Marketing · etc._\n` +
         `_Filename: DD-MM-YYYY\\_description.ext for easy sorting_`;
@@ -1170,8 +1167,7 @@ async function confirmDeleteData(chatId, userId) {
   const invs  = invoiceHistory[userId] || [];
   const stats = calculateStats(invs, companyProfiles[userId]?.currency || 'AED');
   await send(chatId,
-    `🗑 *Delete All Data*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `🗑 *Delete All Data*\n\n` +
     `⚠️ *This will permanently erase:*\n\n` +
     `• Business profile & settings\n` +
     `• *${count}* invoice record${count !== 1 ? 's' : ''}\n` +
@@ -1361,8 +1357,7 @@ async function handleCommandState(chatId, userId, text) {
     };
 
     const curr = CURRENCIES[profile.currency] || {};
-    let preview = `📌 *From Template: ${template.name}*\n`;
-    preview += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    let preview = `📌 *From Template: ${template.name}*\n\n`;
     preview += `🏢 *From:*  ${profile.company_name}\n`;
     preview += `👤 *Bill To:*  ${customerName}\n\n`;
     template.line_items.forEach(li => {
@@ -1808,8 +1803,7 @@ async function selectClientForStatement(chatId, userId) {
 
   if (clients.length === 0) return send(chatId, '⚠️ No clients found.');
 
-  let msg = `📄 *Client Statement PDF*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = `📄 *Client Statement PDF*\n\n`;
   msg += `Select a client to generate their full invoice statement:\n\n`;
 
   // Show as inline buttons (up to 8 clients)
@@ -1943,8 +1937,7 @@ async function handleExpenseEntry(chatId, userId, text) {
     commandState[userId] = { type: 'expense_confirm', expenseData: data };
 
     const msg =
-      `💸 *Expense Preview*\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `💸 *Expense Preview*\n\n` +
       `📝 ${data.description}\n` +
       `🏷 Category: *${data.category}*\n` +
       `💰 *${formatAmount(data.amount, currency)}*\n\n` +
@@ -2002,8 +1995,7 @@ async function handleReceiptPhoto(chatId, userId, photos) {
     const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
     const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
     const msg =
-      `📸 *Receipt Scanned*\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📸 *Receipt Scanned*\n\n` +
       `${merchantLine}` +
       `📝 ${data.description}\n` +
       `🏷 Category: *${data.category}*\n` +
@@ -2085,8 +2077,7 @@ async function handleReceiptDocument(chatId, userId, doc) {
     const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
     const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
     const msg =
-      `${typeLabel}\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `${typeLabel}\n\n` +
       `${merchantLine}` +
       `📝 ${data.description}\n` +
       `🏷 Category: *${data.category}*\n` +
@@ -2117,7 +2108,7 @@ async function showExpenses(chatId, userId) {
 
   if (expenses.length === 0) {
     return send(chatId,
-      `💸 *Expense Tracker*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `💸 *Expense Tracker*\n\n` +
       `No expenses logged yet.\n\n` +
       `*Log an expense:*\n` +
       `- Type: _"Spent 500 on petrol"_\n` +
@@ -2134,8 +2125,7 @@ async function showExpenses(chatId, userId) {
   const allTotal   = expenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   const receiptCount = expenses.filter(e => e.receipt_path).length;
 
-  let msg = `💸 *Expense Tracker*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = `💸 *Expense Tracker*\n\n`;
   msg += `📅 This Month: *${formatAmount(monthTotal, currency)}*\n`;
   msg += `📊 All Time: ${formatAmount(allTotal, currency)}  ·  ${expenses.length} expense${expenses.length !== 1 ? 's' : ''}\n`;
   if (receiptCount > 0) {
@@ -2176,8 +2166,7 @@ async function showProfitLoss(chatId, userId, period) {
   const currency = profile.currency;
   const isProfit = pl.profit >= 0;
 
-  let msg = `📈 *Profit & Loss - ${PERIOD_NAMES[period] || period}*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = `📈 *Profit & Loss - ${PERIOD_NAMES[period] || period}*\n\n`;
   msg += `💰 Revenue:   *${formatAmount(pl.revenue, currency)}*\n`;
   msg += `💸 Expenses:  *${formatAmount(pl.expenses, currency)}*\n`;
   msg += `\n`;
@@ -2186,7 +2175,7 @@ async function showProfitLoss(chatId, userId, period) {
 
   if (Object.keys(pl.byCategory).length > 0) {
     const maxExp = Math.max(...Object.values(pl.byCategory));
-    msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━\n\n`;
     msg += `🏷 *Expense Breakdown*\n\n`;
     const catEmoji = { Travel: '✈️', Software: '💻', Office: '🏢', Marketing: '📣', Subcontractors: '👷', Equipment: '🔧', Other: '📦' };
     Object.entries(pl.byCategory).sort((a, b) => b[1] - a[1]).forEach(([cat, amt]) => {
@@ -2232,7 +2221,7 @@ async function handleAIInsights(chatId, userId, period) {
   const msg =
     `🤖 *AI Business Insights*\n` +
     `📅 ${PERIOD_NAMES[period] || period}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `━━━━━━━━━━━━━━━━━━━\n\n` +
     `${insight}`;
 
   await send(chatId, msg, { reply_markup: { inline_keyboard: [
@@ -2320,8 +2309,7 @@ async function showClients(chatId, userId) {
   if (!profile) return send(chatId, '⚠️ Please set up your profile first with /setup.');
 
   const clients = listClients(userId);
-  let msg = `👤 *Client Directory*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = `👤 *Client Directory*\n\n`;
 
   if (clients.length === 0) {
     msg += `No clients saved yet.\n\n`;
