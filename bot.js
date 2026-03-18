@@ -267,7 +267,7 @@ function showWelcome(chatId, userId, firstName = 'there') {
         { text: '👥 Clients',   callback_data: 'nav_customers' },
       ],
       [
-        { text: '📊 Stats',     callback_data: 'nav_stats'     },
+        { text: '💸 Expenses',  callback_data: 'nav_expenses'  },
         { text: '📥 Export',    callback_data: 'nav_export'    },
       ],
       [
@@ -311,15 +311,18 @@ function showMoreMenu(chatId) {
     `⚙️ *More*`,
     { reply_markup: { inline_keyboard: [
       [
+        { text: '📊 Stats',      callback_data: 'nav_stats'     },
         { text: '📈 P&L',        callback_data: 'nav_profit'    },
+      ],
+      [
         { text: '⏱ Aging',      callback_data: 'nav_aging'     },
-      ],
-      [
         { text: '🎯 Goal',       callback_data: 'nav_goal'      },
-        { text: '📌 Templates',  callback_data: 'nav_templates' },
       ],
       [
+        { text: '📌 Templates',  callback_data: 'nav_templates' },
         { text: '🔄 Recurring',  callback_data: 'nav_recurring' },
+      ],
+      [
         { text: '👤 Profile',    callback_data: 'nav_profile'   },
       ],
       [{ text: '🏠 Home',        callback_data: 'nav_home'      }],
