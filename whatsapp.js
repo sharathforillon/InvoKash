@@ -14,14 +14,14 @@ const path    = require('path');
 
 const {
   companyProfiles, invoiceHistory, onboardingState, commandState, pendingInvoices,
-  CURRENCIES, PERIOD_NAMES, LOGO_DIR,
+  CURRENCIES, PERIOD_NAMES, LOGO_DIR, RECEIPTS_DIR,
   checkRateLimit, sanitizeInput, formatAmount, getTaxConfig,
   filterInvoicesByPeriod, progressBar, asciiBar, calculateStats,
   classifyIntent, transcribeAudio, validateInvoiceData,
   processInvoiceText, confirmInvoice, markInvoicePaid,
   buildDownloadZip, saveData, generateCSV,
   getAgingReport, getRevenueGoal, setRevenueGoal,
-  getExpenses, calculateProfitLoss,
+  extractExpenseFromImage, extractExpenseFromPDF, logExpense, getExpenses, calculateProfitLoss,
 } = require('./core');
 
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
@@ -227,6 +227,20 @@ app.post('/webhook', async (req, res) => {
     // ── Image (for logo upload during onboarding) ─────────────────────────────
     if (msg.type === 'image' && waOnboarding[userId]?.step === 'logo') {
       await handleWaLogoUpload(from, userId, msg.image);
+      return;
+    }
+
+    // ── Image (receipt scanning for expense logging) ─────────────────────────
+    if (msg.type === 'image' && companyProfiles[userId]) {
+      const caption = msg.image?.caption || '';
+      await handleWaReceiptImage(from, userId, msg.image, caption);
+      return;
+    }
+
+    // ── Document (PDF/image receipt scanning) ────────────────────────────────
+    if (msg.type === 'document' && companyProfiles[userId]) {
+      const caption = msg.document?.caption || '';
+      await handleWaReceiptDocument(from, userId, msg.document, caption);
       return;
     }
 
@@ -509,6 +523,35 @@ async function handleWaCallback(to, userId, id) {
     return;
   }
 
+  // Receipt confirm/cancel
+  if (id === 'wa_rcpt_confirm') {
+    const state = waCmd[userId];
+    if (state?.type === 'receipt_confirm' && state.expenseData) {
+      const expense  = logExpense(userId, state.expenseData);
+      delete waCmd[userId];
+      const currency = companyProfiles[userId]?.currency || 'AED';
+      const merchantNote = expense.merchant ? `  · 🏪 ${expense.merchant}` : '';
+      const commentNote  = expense.comment  ? `\n💬 _${expense.comment}_`  : '';
+      waSend(to,
+        `✅ *Expense Logged*\n─────────────────────\n\n` +
+        `📝 ${expense.description}${merchantNote}\n` +
+        `🏷 ${expense.category}  · 📅 ${expense.date}\n` +
+        `💰 *${formatAmount(expense.amount, currency)}*${commentNote}\n` +
+        `📸 Receipt saved`
+      );
+    }
+    return;
+  }
+  if (id === 'wa_rcpt_cancel') {
+    const state = waCmd[userId];
+    if (state?.type === 'receipt_confirm' && state.expenseData?.receipt_path) {
+      try { fs.unlinkSync(state.expenseData.receipt_path); } catch (_) {}
+    }
+    delete waCmd[userId];
+    waSend(to, '❌ Receipt discarded.');
+    return;
+  }
+
   // Mark as paid
   if (id.startsWith('paid_')) {
     const invoiceId = id.replace('paid_', '');
@@ -616,6 +659,122 @@ async function handleWaVoice(to, userId, audio) {
   } catch (err) {
     console.error('WA voice error:', err.message);
     waSend(to, '⚠️ Could not process voice message. Please type your invoice details.');
+  }
+}
+
+// ─── Receipt Image Handler (WhatsApp) ─────────────────────────────────────────
+async function handleWaReceiptImage(to, userId, image, caption) {
+  await waSend(to, '📸 Scanning receipt...');
+  let receiptPath = null;
+  try {
+    const buffer = await waDownloadMedia(image.id);
+    const receiptFilename = `receipt_${userId}_${Date.now()}.jpg`;
+    receiptPath = path.join(RECEIPTS_DIR, receiptFilename);
+    fs.writeFileSync(receiptPath, buffer);
+
+    const data     = await extractExpenseFromImage(buffer);
+    const currency = companyProfiles[userId].currency;
+
+    if (!data.amount || parseFloat(data.amount) <= 0) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+      return waSend(to,
+        '⚠️ Couldn\'t read a total amount from this receipt.\n\n' +
+        'Try typing the expense instead:\n"Spent 500 on petrol"'
+      );
+    }
+
+    const expenseData = { ...data, receipt_path: receiptPath };
+    if (caption) expenseData.comment = caption;
+    waCmd[userId] = { type: 'receipt_confirm', expenseData };
+
+    const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
+    const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const commentLine  = caption       ? `💬 _${caption}_\n`       : '';
+    const msg =
+      `📸 *Receipt Scanned*\n─────────────────────\n\n` +
+      `${merchantLine}` +
+      `📝 ${data.description}\n` +
+      `🏷 Category: *${data.category}*\n` +
+      `💰 *${formatAmount(data.amount, currency)}*\n` +
+      `${dateLine}` +
+      `${commentLine}\n` +
+      `_Image saved for tax records._`;
+
+    await waSendButtons(to, msg, [
+      { id: 'wa_rcpt_confirm', title: '✅ Log Expense' },
+      { id: 'wa_rcpt_cancel',  title: '❌ Discard' },
+    ]);
+  } catch (err) {
+    console.error('WA receipt scan error:', err.message);
+    if (receiptPath) { try { fs.unlinkSync(receiptPath); } catch (_) {} }
+    waSend(to,
+      '⚠️ Couldn\'t read the receipt. Try typing the expense instead:\n"Spent 300 on coffee"'
+    );
+  }
+}
+
+// ─── Receipt Document Handler (WhatsApp) ──────────────────────────────────────
+async function handleWaReceiptDocument(to, userId, doc, caption) {
+  const mime    = doc.mime_type || '';
+  const isPDF   = mime === 'application/pdf';
+  const isImage = mime.startsWith('image/');
+
+  if (!isPDF && !isImage) {
+    return waSend(to,
+      '⚠️ I can scan *PDF documents* and *images* (JPEG, PNG).\n\n' +
+      'Send a receipt, flight ticket, or invoice to auto-log it as an expense.'
+    );
+  }
+
+  await waSend(to, isPDF ? '📄 Reading document...' : '📸 Scanning image...');
+  let receiptPath = null;
+  try {
+    const buffer = await waDownloadMedia(doc.id);
+    const extMap = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+    const ext    = extMap[mime] || (isPDF ? '.pdf' : '.jpg');
+    const fname  = `receipt_${userId}_${Date.now()}${ext}`;
+    receiptPath  = path.join(RECEIPTS_DIR, fname);
+    fs.writeFileSync(receiptPath, buffer);
+
+    const data     = isPDF ? await extractExpenseFromPDF(buffer) : await extractExpenseFromImage(buffer, mime);
+    const currency = companyProfiles[userId].currency;
+
+    if (!data.amount || parseFloat(data.amount) <= 0) {
+      try { fs.unlinkSync(receiptPath); } catch (_) {}
+      return waSend(to,
+        '⚠️ Couldn\'t find a total amount in this document.\n\n' +
+        'Try typing the expense instead:\n"Flight to Dubai 850"'
+      );
+    }
+
+    const expenseData = { ...data, receipt_path: receiptPath };
+    if (caption) expenseData.comment = caption;
+    waCmd[userId] = { type: 'receipt_confirm', expenseData };
+
+    const typeLabel    = isPDF ? '📄 *Document Scanned*' : '📸 *Image Scanned*';
+    const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
+    const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const commentLine  = caption       ? `💬 _${caption}_\n`       : '';
+    const msg =
+      `${typeLabel}\n─────────────────────\n\n` +
+      `${merchantLine}` +
+      `📝 ${data.description}\n` +
+      `🏷 Category: *${data.category}*\n` +
+      `💰 *${formatAmount(data.amount, currency)}*\n` +
+      `${dateLine}` +
+      `${commentLine}\n` +
+      `_File saved for tax records._`;
+
+    await waSendButtons(to, msg, [
+      { id: 'wa_rcpt_confirm', title: '✅ Log Expense' },
+      { id: 'wa_rcpt_cancel',  title: '❌ Discard' },
+    ]);
+  } catch (err) {
+    console.error('WA document scan error:', err.message);
+    if (receiptPath) { try { fs.unlinkSync(receiptPath); } catch (_) {} }
+    waSend(to,
+      '⚠️ Couldn\'t read this document. Try typing the expense instead:\n"Flight to London 1200"'
+    );
   }
 }
 
@@ -954,7 +1113,8 @@ async function waShowExpenses(to, userId) {
   let msg = `💸 *Expenses — This Month*\n─────────────────────\n\n`;
   msg += `Total: *${formatAmount(monthTotal, currency)}*\n\n`;
   expenses.slice(-5).reverse().forEach(exp => {
-    msg += `• ${exp.description} — ${formatAmount(exp.amount, currency)}\n  🏷 ${exp.category} · ${exp.date}\n\n`;
+    const commentStr = exp.comment ? `\n  💬 _${exp.comment}_` : '';
+    msg += `• ${exp.description} — ${formatAmount(exp.amount, currency)}\n  🏷 ${exp.category} · ${exp.date}${commentStr}\n\n`;
   });
   msg += `Type *PROFIT* for P&L report.`;
 

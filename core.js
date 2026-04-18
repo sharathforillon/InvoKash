@@ -275,6 +275,7 @@ async function generateExpenseExcel(expenses, fallbackCurrency = '') {
     { header: 'Category',    key: 'category',     width: 18 },
     { header: 'Amount',      key: 'amount',       width: 14 },
     { header: 'Currency',    key: 'currency',     width: 10 },
+    { header: 'Comment',     key: 'comment',      width: 36 },
     { header: 'Tax Amount',  key: 'tax',          width: 13 },
     { header: 'Deductible',  key: 'deductible',   width: 12 },
     { header: 'Receipt',     key: 'receipt',      width: 22 },
@@ -305,6 +306,7 @@ async function generateExpenseExcel(expenses, fallbackCurrency = '') {
       category:   exp.category || '',
       amount:     parseFloat(exp.amount) || 0,
       currency:   exp.currency || fallbackCurrency,
+      comment:    exp.comment || '',
       tax:        0.00,
       deductible: 'YES',
       receipt:    hasImage ? '' : '',   // text cleared; image takes over when present
@@ -333,9 +335,9 @@ async function generateExpenseExcel(expenses, fallbackCurrency = '') {
         if (ext) {
           const imgBuf  = fs.readFileSync(exp.receipt_path);
           const imageId = wb.addImage({ buffer: imgBuf, extension: ext });
-          // tl/br are 0-indexed: col 9 = column J (Receipt), row = excelRow - 1 (0-indexed)
+          // tl/br are 0-indexed: col 10 = column K (Receipt), row = excelRow - 1 (0-indexed)
           ws.addImage(imageId, {
-            tl:     { col: 9.05, row: excelRow - 1 + 0.05 },
+            tl:     { col: 10.05, row: excelRow - 1 + 0.05 },
             ext:    { width: 140, height: 68 },
             editAs: 'oneCell',
           });
@@ -1301,6 +1303,7 @@ function logExpense(userId, data) {
   };
   if (data.receipt_path) expense.receipt_path = data.receipt_path;
   if (data.merchant)     expense.merchant     = data.merchant;
+  if (data.comment)      expense.comment      = data.comment;
   expenseHistory[userId].push(expense);
   saveData();
   return expense;

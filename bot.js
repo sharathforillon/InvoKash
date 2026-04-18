@@ -1954,7 +1954,7 @@ async function handleExpenseEntry(chatId, userId, text) {
 }
 
 // ─── Receipt Photo Handler ─────────────────────────────────────────────────────
-async function handleReceiptPhoto(chatId, userId, photos) {
+async function handleReceiptPhoto(chatId, userId, photos, caption) {
   if (!companyProfiles[userId]) {
     return send(chatId, '⚠️ Please set up your profile first with /setup.');
   }
@@ -1986,21 +1986,25 @@ async function handleReceiptPhoto(chatId, userId, photos) {
       );
     }
 
-    // Store state including saved receipt path
+    // Store state including saved receipt path and user caption as comment
+    const expenseData = { ...data, receipt_path: receiptPath };
+    if (caption) expenseData.comment = caption;
     commandState[userId] = {
       type:        'receipt_confirm',
-      expenseData: { ...data, receipt_path: receiptPath },
+      expenseData,
     };
 
     const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
     const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const commentLine  = caption       ? `💬 _${caption}_\n`       : '';
     const msg =
       `📸 *Receipt Scanned*\n\n` +
       `${merchantLine}` +
       `📝 ${data.description}\n` +
       `🏷 Category: *${data.category}*\n` +
       `💰 *${formatAmount(data.amount, currency)}*\n` +
-      `${dateLine}\n` +
+      `${dateLine}` +
+      `${commentLine}\n` +
       `_Looks right? Image saved for tax records._`;
 
     await send(chatId, msg, { reply_markup: { inline_keyboard: [
@@ -2018,7 +2022,7 @@ async function handleReceiptPhoto(chatId, userId, photos) {
 }
 
 // ─── Receipt Document Handler (PDFs + images sent as files) ───────────────────
-async function handleReceiptDocument(chatId, userId, doc) {
+async function handleReceiptDocument(chatId, userId, doc, caption) {
   if (!companyProfiles[userId]) {
     return send(chatId, '⚠️ Please set up your profile first with /setup.');
   }
@@ -2068,21 +2072,26 @@ async function handleReceiptDocument(chatId, userId, doc) {
       );
     }
 
+    // Store state including user caption as comment
+    const expenseData = { ...data, receipt_path: receiptPath };
+    if (caption) expenseData.comment = caption;
     commandState[userId] = {
       type:        'receipt_confirm',
-      expenseData: { ...data, receipt_path: receiptPath },
+      expenseData,
     };
 
     const typeLabel    = isPDF ? '📄 *Document Scanned*' : '📸 *Image Scanned*';
     const merchantLine = data.merchant ? `🏪 *${data.merchant}*\n` : '';
     const dateLine     = data.date     ? `📅 ${data.date}\n`       : '';
+    const commentLine  = caption       ? `💬 _${caption}_\n`       : '';
     const msg =
       `${typeLabel}\n\n` +
       `${merchantLine}` +
       `📝 ${data.description}\n` +
       `🏷 Category: *${data.category}*\n` +
       `💰 *${formatAmount(data.amount, currency)}*\n` +
-      `${dateLine}\n` +
+      `${dateLine}` +
+      `${commentLine}\n` +
       `_Looks right? File saved for tax records._`;
 
     await send(chatId, msg, { reply_markup: { inline_keyboard: [
@@ -2138,8 +2147,9 @@ async function showExpenses(chatId, userId) {
     const icon         = catEmoji[exp.category] || '📦';
     const receiptBadge = exp.receipt_path ? ' 📸' : '';
     const merchantStr  = exp.merchant ? `  🏪 ${exp.merchant}  ·` : '';
+    const commentStr   = exp.comment  ? `\n  💬 _${exp.comment}_` : '';
     msg += `${icon} *${formatAmount(exp.amount, exp.currency || currency)}* - ${exp.description}${receiptBadge}\n`;
-    msg += `  ${merchantStr} 🏷 ${exp.category}  ·  📅 ${exp.date}\n\n`;
+    msg += `  ${merchantStr} 🏷 ${exp.category}  ·  📅 ${exp.date}${commentStr}\n\n`;
   });
 
   if (expenses.length > SHOW_LIMIT) msg += `_+${expenses.length - SHOW_LIMIT} older expenses · export for full list_\n`;
@@ -2771,9 +2781,9 @@ function startTelegramBot() {
       if (text === '💸 Log Expense') { delete commandState[userId]; return showExpensePrompt(chatId, userId); }
       if (msg.photo && onboardingState[userId]?.step === 'logo') { await handleLogoUpload(chatId, userId, msg.photo); return; }
       if (msg.photo && onboardingState[userId]) return; // ignore photos during other onboarding steps
-      if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo); return; }
+      if (msg.photo && companyProfiles[userId]) { await handleReceiptPhoto(chatId, userId, msg.photo, msg.caption); return; }
       if (msg.document && onboardingState[userId]) return; // ignore documents during onboarding
-      if (msg.document && companyProfiles[userId]) { await handleReceiptDocument(chatId, userId, msg.document); return; }
+      if (msg.document && companyProfiles[userId]) { await handleReceiptDocument(chatId, userId, msg.document, msg.caption); return; }
       if (!companyProfiles[userId] && !onboardingState[userId]) { await showLanding(chatId, firstName); return; }
       if (msg.voice) { await handleVoiceMessage(chatId, userId, msg.voice, firstName); return; }
       if (onboardingState[userId]) { await handleOnboarding(chatId, userId, text); return; }
@@ -2914,11 +2924,12 @@ function startTelegramBot() {
           delete commandState[userId];
           const currency = companyProfiles[userId]?.currency || 'AED';
           const merchantNote = expense.merchant ? `  ·  🏪 ${expense.merchant}` : '';
+          const commentNote  = expense.comment  ? `\n💬 _${expense.comment}_`   : '';
           send(chatId,
             `✅ *Expense Logged*\n\n` +
             `📝 ${expense.description}${merchantNote}\n` +
             `🏷 ${expense.category}  ·  📅 ${expense.date}\n` +
-            `💰 *${formatAmount(expense.amount, currency)}*\n` +
+            `💰 *${formatAmount(expense.amount, currency)}*${commentNote}\n` +
             `📸 Receipt saved`,
             { reply_markup: { inline_keyboard: [
               [{ text: '📋 All Expenses',       callback_data: 'nav_expenses'        }],
